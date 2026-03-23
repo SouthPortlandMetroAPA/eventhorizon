@@ -514,10 +514,10 @@
      */
     function formatDate(dateStr) {
       if (!dateStr) return '';
-      // Parse as local date (not UTC) by splitting the string.
-      // new Date('2026-03-28') parses as UTC midnight, which can shift
-      // the day in negative-offset timezones. Splitting avoids this.
-      var parts = dateStr.split('-');
+      // Handle full ISO datetime (2026-03-28T09:00:00-07:00) or date-only (2026-03-28)
+      var datePart = dateStr.split('T')[0];
+      var parts = datePart.split('-');
+      if (parts.length < 3) return dateStr;
       var d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
       return d.toLocaleDateString('en-US', {
         weekday: 'long',
@@ -554,10 +554,24 @@
      * @returns {string} e.g. "9:00 AM \u2013 5:00 PM" or single time if no end
      */
     function formatTimeRange(start, end) {
-      var s = formatTime(start);
-      var e = formatTime(end);
+      // Extract time from ISO datetime strings if needed
+      var startTime = extractTime(start);
+      var endTime = extractTime(end);
+      var s = formatTime(startTime);
+      var e = formatTime(endTime);
       if (s && e) return s + ' \u2013 ' + e;
       return s || e || '';
+    }
+
+    // Extract HH:MM from an ISO datetime string or return as-is if already HH:MM
+    function extractTime(str) {
+      if (!str) return '';
+      // Date-only strings (all-day events) have no 'T'
+      if (str.indexOf('T') === -1) return '';
+      // "2026-03-28T09:00:00-07:00" → "09:00"
+      var timePart = str.split('T')[1];
+      if (!timePart) return '';
+      return timePart.substring(0, 5); // "09:00"
     }
 
 
@@ -590,18 +604,28 @@
     function renderEventFields(evt) {
       if (!evt) return '<div style="color:var(--muted); font-style:italic;">No data</div>';
       var html = '';
-      if (evt.title) {
-        html += '<div class="sync-field"><span class="sync-field-value">' + SPM.esc(evt.title) + '</span></div>';
+      // Title
+      var title = evt.title || evt.summary || '';
+      if (title) {
+        html += '<div class="sync-field"><span class="sync-field-value" style="font-weight:700;">' + SPM.esc(title) + '</span></div>';
       }
-      if (evt.date) {
-        html += '<div class="sync-field"><span class="sync-field-label">Date </span><span class="sync-field-value">' + SPM.esc(formatDate(evt.date)) + '</span></div>';
+      // Date + Time — API returns evt.start/evt.end as ISO strings
+      var startStr = evt.start || evt.date || '';
+      var endStr = evt.end || '';
+      if (startStr) {
+        html += '<div class="sync-field"><span class="sync-field-label">Date </span><span class="sync-field-value">' + SPM.esc(formatDate(startStr)) + '</span></div>';
+        var timeRange = formatTimeRange(startStr, endStr);
+        if (timeRange) {
+          html += '<div class="sync-field"><span class="sync-field-label">Time </span><span class="sync-field-value">' + SPM.esc(timeRange) + '</span></div>';
+        }
       }
-      var timeRange = formatTimeRange(evt.startTime, evt.endTime);
-      if (timeRange) {
-        html += '<div class="sync-field"><span class="sync-field-label">Time </span><span class="sync-field-value">' + SPM.esc(timeRange) + '</span></div>';
+      // Location — could be string or object { name, address, city, zip }
+      var loc = evt.location || '';
+      if (typeof loc === 'object') {
+        loc = [loc.name, loc.address, loc.city, loc.zip].filter(Boolean).join(', ');
       }
-      if (evt.location) {
-        html += '<div class="sync-field"><span class="sync-field-label">Location </span><span class="sync-field-value">' + SPM.esc(evt.location) + '</span></div>';
+      if (loc) {
+        html += '<div class="sync-field"><span class="sync-field-label">Location </span><span class="sync-field-value">' + SPM.esc(loc) + '</span></div>';
       }
       return html;
     }
@@ -633,8 +657,8 @@
         var ob = order[b.status] !== undefined ? order[b.status] : 9;
         if (oa !== ob) return oa - ob;
         // Secondary sort by date
-        var da = (a.apaEvent && a.apaEvent.date) || (a.calEvent && a.calEvent.date) || '';
-        var db = (b.apaEvent && b.apaEvent.date) || (b.calEvent && b.calEvent.date) || '';
+        var da = (a.apaEvent && a.apaEvent.date) || (a.calendarEvent && a.calendarEvent.start) || '';
+        var db = (b.apaEvent && b.apaEvent.date) || (b.calendarEvent && b.calendarEvent.start) || '';
         return da.localeCompare(db);
       });
 
@@ -674,7 +698,7 @@
       // Show primary title in header for quick scanning
       var primaryTitle = '';
       if (item.apaEvent) primaryTitle = item.apaEvent.title;
-      else if (item.calEvent) primaryTitle = item.calEvent.title;
+      else if (item.calendarEvent) primaryTitle = item.calendarEvent.title;
       if (primaryTitle) {
         html += '<span style="font-weight:700; font-size:0.9375rem;">' + SPM.esc(primaryTitle) + '</span>';
       }
@@ -687,7 +711,7 @@
         // Side-by-side comparison
         html += '<div class="sync-comparison">';
         html += '<div class="sync-side"><div class="sync-side-label">APA Event</div>' + renderEventFields(item.apaEvent) + '</div>';
-        html += '<div class="sync-side"><div class="sync-side-label">Google Calendar</div>' + renderEventFields(item.calEvent) + '</div>';
+        html += '<div class="sync-side"><div class="sync-side-label">Google Calendar</div>' + renderEventFields(item.calendarEvent) + '</div>';
         html += '</div>';
       } else if (item.status === 'unlinked') {
         // Single APA event detail
@@ -701,7 +725,7 @@
         }
       } else if (item.status === 'calendar_only') {
         // Single calendar event detail
-        html += '<div class="sync-detail">' + renderEventFields(item.calEvent) + '</div>';
+        html += '<div class="sync-detail">' + renderEventFields(item.calendarEvent) + '</div>';
       }
 
       html += '</div>'; // end sync-card-body
@@ -893,7 +917,7 @@
 
       var filtered = calendarOnlyItems.filter(function(item) {
         if (!lower) return true;
-        var evt = item.calEvent || {};
+        var evt = item.calendarEvent || {};
         var haystack = ((evt.title || '') + ' ' + (evt.date || '') + ' ' + (evt.location || '')).toLowerCase();
         return haystack.indexOf(lower) !== -1;
       });
@@ -905,7 +929,7 @@
 
       var html = '';
       for (var i = 0; i < filtered.length; i++) {
-        var evt = filtered[i].calEvent;
+        var evt = filtered[i].calendarEvent;
         if (!evt) continue;
         var calId = SPM.esc(evt.id);
         html += '<li class="picker-item" onclick="doLink(\'' + SPM.esc(pendingLinkApaId) + '\', \'' + calId + '\')">';
