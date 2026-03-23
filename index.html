@@ -1730,8 +1730,9 @@
       // Hide banner
       document.getElementById('linkBanner').classList.remove('active');
 
-      // Re-render to remove selected state
-      renderAll();
+      // Full server refresh to ensure UI matches reality.
+      // Prevents stale client state from showing phantom links.
+      loadSyncStatus();
     }
 
     /**
