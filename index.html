@@ -725,11 +725,11 @@
       if (item.status === 'unlinked' && item.apaEvent) {
         html += '<button class="spm-btn spm-btn-primary" onclick="doCreate(\'' + SPM.esc(item.apaEvent.id) + '\')">Create New</button>';
         html += '<button class="spm-btn spm-btn-secondary" onclick="openPicker(\'' + SPM.esc(item.apaEvent.id) + '\')">Link To\u2026</button>';
-      } else if (item.status === 'needs_update' && item.apaEvent) {
-        html += '<button class="spm-btn spm-btn-primary" onclick="doUpdate(\'' + SPM.esc(item.apaEvent.id) + '\')">Update Calendar</button>';
-        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.apaEvent.id) + '\')">Unlink</button>';
-      } else if (item.status === 'linked' && item.apaEvent) {
-        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.apaEvent.id) + '\')">Unlink</button>';
+      } else if (item.status === 'needs_update' && item.apaEvent && item.calendarEvent) {
+        html += '<button class="spm-btn spm-btn-primary" onclick="doUpdate(\'' + SPM.esc(item.calendarEvent.calendarEventId) + '\',\'' + SPM.esc(item.apaEvent.id) + '\')">Update Calendar</button>';
+        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.calendarEvent.calendarEventId) + '\')">Unlink</button>';
+      } else if (item.status === 'linked' && item.calendarEvent) {
+        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.calendarEvent.calendarEventId) + '\')">Unlink</button>';
       }
       // calendar_only: no actions
 
@@ -759,6 +759,8 @@
             document.getElementById('skeletons').style.display = 'none';
             return;
           }
+          // API returns { syncItems: [...] }, frontend expects { items: [...] }
+          data.items = data.syncItems || data.items || [];
           syncData = data;
           renderSyncList();
         })
@@ -784,7 +786,7 @@
      */
     function doCreate(apaEventId) {
       SPM.setStatus('Creating calendar event...');
-      SPM.callServer('createEvent', { apaEventId: apaEventId })
+      SPM.callServer('createCalendarEvent', { apaEventId: apaEventId })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
           showToast('Event created');
@@ -804,7 +806,7 @@
     function doLink(apaEventId, calEventId) {
       closePickerModal();
       SPM.setStatus('Linking events...');
-      SPM.callServer('linkEvent', { apaEventId: apaEventId, calEventId: calEventId })
+      SPM.callServer('linkEvents', { apaEventId: apaEventId, calendarEventId: calEventId })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
           showToast('Events linked');
@@ -820,9 +822,9 @@
      *
      * @param {string} apaEventId - the APA event ID whose link to update
      */
-    function doUpdate(apaEventId) {
+    function doUpdate(calendarEventId, apaEventId) {
       SPM.setStatus('Updating calendar event...');
-      SPM.callServer('updateEvent', { apaEventId: apaEventId })
+      SPM.callServer('updateCalendarEvent', { calendarEventId: calendarEventId, apaEventId: apaEventId })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
           showToast('Event updated');
@@ -839,9 +841,9 @@
      *
      * @param {string} apaEventId - the APA event ID to unlink
      */
-    function doUnlink(apaEventId) {
+    function doUnlink(calendarEventId) {
       SPM.setStatus('Unlinking event...');
-      SPM.callServer('unlinkEvent', { apaEventId: apaEventId })
+      SPM.callServer('unlinkEvent', { calendarEventId: calendarEventId })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
           showToast('Event unlinked');
