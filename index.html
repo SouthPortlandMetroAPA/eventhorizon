@@ -9,7 +9,8 @@
   PURPOSE:
     Three-column admin dashboard for EventHorizon calendar sync. Desktop only.
     Left: APA events (poolplayers.com). Center: linked pairs. Right: Google
-    Calendar events. Supports create, link, update, unlink actions.
+    Calendar events. Supports create, link, update, unlink, ignore, and
+    scan-for-changes actions.
 
   AUTHENTICATION:
     Admin token from URL query param: ?admin=<token>
@@ -31,6 +32,11 @@
     unlinkEvent          — removes link between APA and calendar events
     linkEvents           — links one APA event to one calendar event (used
                            internally by batchLinkEvents)
+    getIgnoredEvents     — returns { ignoredIds: string[] }
+    ignoreApaEvent       — params: { apaEventId } → returns { ignoredIds }
+    unignoreApaEvent     — params: { apaEventId } → returns { ignoredIds }
+    scanForChanges       — returns { changes: [...], totalChanges }
+    applyAllChanges      — params: { changes: [...] } → returns { updated, errors[] }
 
   SYNC ITEM SHAPE (from getSyncStatus):
     status:       'linked' | 'unlinked' | 'calendar_only'
@@ -43,6 +49,7 @@
 
   THREE-COLUMN LAYOUT:
     Left:   APA Events — deduplicated by apaEventId. Linked ones faded.
+            Ignored ones show muted style with strikethrough + badge.
     Center: Linked groups — linked items grouped by apaEventId (1:many).
     Right:  Calendar Events — all items with calendarEvent. Linked ones faded.
 
@@ -59,6 +66,11 @@
     6. Modal shows which fields (title/location/description) to copy
     7. "Link & Update" calls batchLinkEvents API
     8. Cancel or Escape exits linking mode
+
+  FILTER TOGGLES:
+    - "Hide Linked" on APA + Calendar columns: hides faded/linked cards
+    - "Hide Ignored" on APA column: hides ignored cards (ON by default)
+    - All toggle states are ephemeral — reset on page refresh
 
   DESKTOP ONLY:
     No mobile/tablet responsive code. No device detection.
@@ -249,7 +261,7 @@
       background: var(--spm-accent);
     }
 
-    /* Column filter input */
+    /* Column filter input + toggle area */
     .eh-col-filter {
       padding: 8px 16px;
       flex-shrink: 0;
@@ -268,6 +280,42 @@
     .eh-col-filter input:focus {
       outline: 2px solid var(--spm-accent);
       outline-offset: -2px;
+    }
+
+    /* Filter toggle buttons row (below filter input) */
+    .eh-col-toggles {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    /* Pill toggle button — outline when inactive, filled when active */
+    .eh-toggle-btn {
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      min-height: 24px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      /* Inactive (outline) state */
+      background: #fff;
+      color: #6b7280;
+      border: 1px solid var(--border);
+    }
+    .eh-toggle-btn:hover {
+      background: #f3f4f6;
+    }
+    /* Active (filled) state */
+    .eh-toggle-btn.active {
+      background: #374151;
+      color: #fff;
+      border-color: #374151;
+    }
+    .eh-toggle-btn.active:hover {
+      background: #4b5563;
+      border-color: #4b5563;
     }
 
     /* Column scrollable body */
@@ -333,6 +381,16 @@
       background: #eff6ff;
     }
 
+    /* Ignore / Unignore button — subtle grey */
+    .eh-btn-ignore {
+      background: #fff;
+      color: #6b7280;
+      border: 1px solid var(--border);
+    }
+    .eh-btn-ignore:hover {
+      background: #f3f4f6;
+    }
+
     /* Linked/muted card state (in left/right columns) */
     .eh-event-card.is-linked {
       opacity: 0.5;
@@ -343,6 +401,25 @@
       font-weight: 700;
       color: #166534;
       background: #dcfce7;
+      padding: 1px 8px;
+      border-radius: 999px;
+      margin-bottom: 4px;
+    }
+
+    /* Ignored card state (APA column only) — muted with strikethrough */
+    .eh-event-card.is-ignored {
+      opacity: 0.45;
+    }
+    .eh-event-card.is-ignored .eh-event-card-title {
+      text-decoration: line-through;
+      color: var(--muted);
+    }
+    .eh-event-card .ignored-badge {
+      display: inline-block;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      color: #6b7280;
+      background: #e5e7eb;
       padding: 1px 8px;
       border-radius: 999px;
       margin-bottom: 4px;
@@ -575,6 +652,8 @@
       max-width: 520px;
       width: 90%;
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+      max-height: 80vh;
+      overflow-y: auto;
     }
     .eh-modal-title {
       font-size: 1rem;
@@ -664,6 +743,46 @@
     }
     .eh-modal-btn-confirm:hover {
       background: #002480;
+    }
+
+    /* -- Scan Changes modal — wider for diff table ---------------------- */
+    .eh-modal.eh-modal--wide {
+      max-width: 680px;
+    }
+    .eh-changes-group {
+      margin-bottom: 16px;
+      padding: 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .eh-changes-group-title {
+      font-size: 0.875rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .eh-changes-group-count {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--muted);
+    }
+    .eh-changes-diff {
+      font-size: 0.8125rem;
+      padding: 4px 0;
+      line-height: 1.5;
+    }
+    .eh-changes-diff-field {
+      font-weight: 700;
+      color: var(--muted);
+      min-width: 80px;
+      display: inline-block;
+    }
+    .eh-changes-diff-old {
+      color: #991b1b;
+      text-decoration: line-through;
+    }
+    .eh-changes-diff-new {
+      color: #166534;
     }
 
     /* -- Skeleton loaders ----------------------------------------------- */
@@ -757,10 +876,11 @@
     <!-- ================================================================ -->
     <div id="mainContent" style="display: none; flex: 1; overflow: hidden; display: flex; flex-direction: column;">
 
-      <!-- Top bar: refresh button + status -->
+      <!-- Top bar: refresh + scan + unlink all + status -->
       <div class="eh-topbar">
         <div class="eh-topbar-left">
           <button class="eh-refresh-btn" id="refreshBtn">&#8635; Refresh</button>
+          <button class="eh-refresh-btn" id="scanChangesBtn" style="background:#fff;color:#f97316;border:2px solid #f97316;">Scan Changes</button>
           <button class="eh-refresh-btn" id="unlinkAllBtn" style="background:#fff;color:var(--spm-primary);border:2px solid var(--spm-primary);display:none;" onclick="doGlobalUnlinkAll()">Unlink All</button>
         </div>
         <div class="eh-topbar-status" id="statusText">Loading...</div>
@@ -786,6 +906,10 @@
           </div>
           <div class="eh-col-filter">
             <input type="text" id="filterApa" placeholder="Filter APA events...">
+            <div class="eh-col-toggles">
+              <button class="eh-toggle-btn" id="toggleHideLinkedApa">Hide Linked</button>
+              <button class="eh-toggle-btn active" id="toggleHideIgnored">Hide Ignored</button>
+            </div>
           </div>
           <div class="eh-col-body" id="listApa">
             <div class="eh-skeleton"></div>
@@ -814,6 +938,9 @@
           </div>
           <div class="eh-col-filter">
             <input type="text" id="filterCal" placeholder="Filter calendar events...">
+            <div class="eh-col-toggles">
+              <button class="eh-toggle-btn" id="toggleHideLinkedCal">Hide Linked</button>
+            </div>
           </div>
           <div class="eh-col-body" id="listCal">
             <div class="eh-skeleton"></div>
@@ -838,11 +965,11 @@
   <div class="eh-toast" id="toast"></div>
 
   <!-- ================================================================== -->
-  <!-- Field Preview Modal (shown before batchLinkEvents) -->
+  <!-- Field Preview Modal / Changes Modal (shared overlay) -->
   <!-- ================================================================== -->
   <div class="eh-modal-overlay" id="modalOverlay">
     <div class="eh-modal" id="modalContent">
-      <!-- Populated dynamically by showFieldPreviewModal() -->
+      <!-- Populated dynamically by showFieldPreviewModal() or showChangesModal() -->
     </div>
   </div>
 
@@ -879,8 +1006,10 @@
     //   - spm-base.css: card, button, badge, header classes
     //
     // DATA FLOW:
-    //   1. On load -> getSyncStatus -> split into 3 lists -> render columns
-    //   2. User action -> create / batchLink / update / unlink API call
+    //   1. On load -> getSyncStatus + getIgnoredEvents (parallel)
+    //      -> split into 3 lists -> render columns
+    //   2. User action -> create / batchLink / update / unlink / ignore /
+    //      scanForChanges / applyAllChanges API call
     //   3. After action -> toast + full refresh (getSyncStatus again)
     //
     // LINKING FLOW (multi-select checkbox mode):
@@ -890,6 +1019,11 @@
     //   4. Click "Link Selected (N)" -> field preview modal
     //   5. Confirm in modal -> batchLinkEvents API -> refresh
     //   6. Cancel exits linking mode
+    //
+    // FILTER TOGGLES:
+    //   - hideLinkedApa / hideLinkedCal: hide is-linked cards in L/R columns
+    //   - hideIgnored: hide ignored APA cards (default: ON)
+    //   - All ephemeral — reset on refresh
     //
     // ======================================================================
 
@@ -921,6 +1055,14 @@
 
     /** Linking mode: set of checked calendarEventIds */
     var checkedCalIds = {};
+
+    /** Set of ignored APA event IDs. Loaded from getIgnoredEvents on init. */
+    var ignoredApaIds = new Set();
+
+    /** Filter toggle states (ephemeral, reset on page refresh) */
+    var hideLinkedApa = false;
+    var hideLinkedCal = false;
+    var hideIgnored = true;  // Default: hide ignored events
 
 
     // ======================================================================
@@ -1173,9 +1315,13 @@
 
     /**
      * Renders the APA events column. Unlinked events get action buttons
-     * (Create New, Link >). Linked events are faded with a "Linked" badge.
+     * (Create New, Link >, Ignore). Linked events are faded with a
+     * "Linked" badge. Ignored events show muted style with strikethrough
+     * title and "IGNORED" badge, plus an "Unignore" button.
      *
      * Multi-day APA events show "Create New (N days)" instead of "Create New".
+     *
+     * Filter toggles hideLinkedApa and hideIgnored control card visibility.
      *
      * @param {string} filter - search filter (case-insensitive)
      */
@@ -1202,10 +1348,19 @@
         var item = filtered[i];
         var evt = item.apaEvent;
         var isLinked = !!linkedApaIds[evt.apaEventId];
+        var isIgnored = ignoredApaIds.has(evt.apaEventId);
         var isSelected = (linkingApaEventId === evt.apaEventId);
+
+        // Hide Linked toggle: skip linked cards when active
+        if (hideLinkedApa && isLinked && !isSelected) continue;
+
+        // Hide Ignored toggle: skip ignored cards when active
+        // (ignored state only applies to unlinked events)
+        if (hideIgnored && isIgnored && !isLinked) continue;
 
         var cardClass = 'eh-event-card';
         if (isLinked && !isSelected) cardClass += ' is-linked';
+        if (isIgnored && !isLinked) cardClass += ' is-ignored';
         if (isSelected) cardClass += ' is-selected';
 
         html += '<div class="' + cardClass + '" data-apa-id="' + SPM.esc(evt.apaEventId) + '">';
@@ -1213,6 +1368,11 @@
         // Linked badge (for linked cards)
         if (isLinked) {
           html += '<span class="linked-badge">\u2713 Linked</span>';
+        }
+
+        // Ignored badge (for ignored unlinked cards)
+        if (isIgnored && !isLinked) {
+          html += '<span class="ignored-badge">IGNORED</span>';
         }
 
         // Title
@@ -1242,17 +1402,22 @@
         }
         html += '</div>'; // end meta
 
-        // Action buttons (only for unlinked)
+        // Action buttons
         if (!isLinked) {
           html += '<div class="eh-event-card-actions">';
 
-          // Create New — show day count for multi-day events
-          var dayCount = getEventDayCount(evt.start, evt.end);
-          var createLabel = dayCount > 1 ? 'Create New (' + dayCount + ' days)' : 'Create New';
-          html += '<button class="eh-btn-create" onclick="doCreate(\'' + SPM.esc(evt.apaEventId) + '\', ' + dayCount + ')">' + SPM.esc(createLabel) + '</button>';
+          if (isIgnored) {
+            // Ignored event: show Unignore button only
+            html += '<button class="eh-btn-ignore" onclick="doUnignore(\'' + SPM.esc(evt.apaEventId) + '\')">Unignore</button>';
+          } else {
+            // Normal unlinked: Create New + Link > + Ignore
+            var dayCount = getEventDayCount(evt.start, evt.end);
+            var createLabel = dayCount > 1 ? 'Create New (' + dayCount + ' days)' : 'Create New';
+            html += '<button class="eh-btn-create" onclick="doCreate(\'' + SPM.esc(evt.apaEventId) + '\', ' + dayCount + ')">' + SPM.esc(createLabel) + '</button>';
+            html += '<button class="eh-btn-link" onclick="enterLinkingMode(\'' + SPM.esc(evt.apaEventId) + '\')">Link \u25b8</button>';
+            html += '<button class="eh-btn-ignore" onclick="doIgnore(\'' + SPM.esc(evt.apaEventId) + '\')">Ignore</button>';
+          }
 
-          // Link > button
-          html += '<button class="eh-btn-link" onclick="enterLinkingMode(\'' + SPM.esc(evt.apaEventId) + '\')">Link \u25b8</button>';
           html += '</div>';
         }
 
@@ -1377,6 +1542,8 @@
      * Renders the Google Calendar events column. Linked events are faded.
      * In linking mode, unlinked cards get checkboxes for multi-select.
      *
+     * Filter toggle hideLinkedCal controls linked card visibility.
+     *
      * @param {string} filter - search filter (case-insensitive)
      */
     function renderCalColumn(filter) {
@@ -1405,6 +1572,9 @@
         var evt = item.calendarEvent;
         var isLinked = !!linkedCalIds[evt.calendarEventId];
         var isChecked = !!checkedCalIds[evt.calendarEventId];
+
+        // Hide Linked toggle: skip linked cards when active
+        if (hideLinkedCal && isLinked) continue;
 
         var cardClass = 'eh-event-card';
         if (isLinked) cardClass += ' is-linked';
@@ -1507,6 +1677,7 @@
       parts.push(calList.length + ' calendar');
       parts.push(totalLinked + ' linked');
       if (needsUpdate) parts.push(needsUpdate + ' need update');
+      if (ignoredApaIds.size > 0) parts.push(ignoredApaIds.size + ' ignored');
       document.getElementById('statusText').textContent = parts.join(' \u00b7 ');
     }
 
@@ -1614,6 +1785,9 @@
       var loc = formatLocation(apa.location);
       var desc = apa.description || '';
 
+      // Reset modal to default (non-wide) style
+      document.getElementById('modalContent').className = 'eh-modal';
+
       var html = '';
       html += '<div class="eh-modal-title">Link "' + SPM.esc(title || 'Untitled') + '" to ' + checkedIds.length + ' calendar event' + (checkedIds.length > 1 ? 's' : '') + '</div>';
 
@@ -1700,6 +1874,29 @@
         })
         .finally(function() {
           document.getElementById('refreshBtn').disabled = false;
+        });
+    }
+
+    /**
+     * Fetches the list of ignored APA event IDs from the API.
+     * Stores them in the ignoredApaIds Set for O(1) lookup.
+     * Called once on page load (parallel with getSyncStatus).
+     */
+    function loadIgnoredEvents() {
+      SPM.callServer('getIgnoredEvents')
+        .then(function(data) {
+          if (data.error) {
+            console.warn('Failed to load ignored events:', data.error);
+            return;
+          }
+          ignoredApaIds = new Set(data.ignoredIds || []);
+          // Re-render if sync data is already loaded (race condition safe)
+          if (syncItems.length > 0) {
+            renderAll();
+          }
+        })
+        .catch(function(err) {
+          console.warn('Failed to load ignored events:', err.message);
         });
     }
 
@@ -1925,8 +2122,15 @@
     /**
      * Global unlink: unlinks ALL linked calendar events across all groups.
      * Prompts for confirmation first.
+     *
+     * BUG FIX: Collects all calendar event IDs into a flat array BEFORE
+     * starting the sequential chain. The chain references only the
+     * pre-captured array, not the linkedGroups state, which could mutate
+     * if a re-render happens during execution.
      */
     function doGlobalUnlinkAll() {
+      // Snapshot all calendar event IDs into a flat array BEFORE any async work.
+      // This prevents issues if linkedGroups mutates during the chain.
       var allCalIds = [];
       for (var g = 0; g < linkedGroups.length; g++) {
         for (var c = 0; c < linkedGroups[g].calEvents.length; c++) {
@@ -1937,16 +2141,25 @@
 
       if (!confirm('Unlink all ' + allCalIds.length + ' linked calendar events? This does not delete them.')) return;
 
-      document.getElementById('statusText').textContent = 'Unlinking ' + allCalIds.length + ' events...';
+      var totalCount = allCalIds.length;
+      document.getElementById('statusText').textContent = 'Unlinking ' + totalCount + ' events...';
       document.getElementById('unlinkAllBtn').disabled = true;
 
+      // Build sequential chain from the pre-captured flat array.
+      // Each step references allCalIds[i] by closure — no live reference
+      // to linkedGroups during execution.
       var chain = Promise.resolve();
       var errors = [];
       for (var i = 0; i < allCalIds.length; i++) {
         (function(calId) {
           chain = chain.then(function() {
             return SPM.callServer('unlinkEvent', { calendarEventId: calId })
-              .then(function(data) { if (data.error) errors.push(data.error); });
+              .then(function(data) {
+                if (data.error) errors.push(data.error);
+              })
+              .catch(function(err) {
+                errors.push(err.message);
+              });
           });
         })(allCalIds[i]);
       }
@@ -1956,13 +2169,188 @@
           if (errors.length > 0) {
             showError(errors.length + ' unlinks failed');
           } else {
-            showToast('All ' + allCalIds.length + ' events unlinked');
+            showToast('All ' + totalCount + ' events unlinked');
           }
           loadSyncStatus();
         })
         .catch(function(err) {
           showError('Global unlink failed: ' + err.message);
           document.getElementById('unlinkAllBtn').disabled = false;
+        });
+    }
+
+
+    // ======================================================================
+    // Ignore / Unignore Actions
+    // ======================================================================
+
+    /**
+     * Marks an unlinked APA event as ignored. Removes it from the active
+     * list (or shows it muted with strikethrough if visible).
+     *
+     * @param {string} apaEventId - the APA event ID to ignore
+     */
+    function doIgnore(apaEventId) {
+      document.getElementById('statusText').textContent = 'Ignoring event...';
+      SPM.callServer('ignoreApaEvent', { apaEventId: apaEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          ignoredApaIds = new Set(data.ignoredIds || []);
+          showToast('Event ignored');
+          renderAll();
+        })
+        .catch(function(err) {
+          showError('Ignore failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Removes an APA event from the ignored list, restoring it to
+     * the active unlinked state with full action buttons.
+     *
+     * @param {string} apaEventId - the APA event ID to unignore
+     */
+    function doUnignore(apaEventId) {
+      document.getElementById('statusText').textContent = 'Unignoring event...';
+      SPM.callServer('unignoreApaEvent', { apaEventId: apaEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          ignoredApaIds = new Set(data.ignoredIds || []);
+          showToast('Event unignored');
+          renderAll();
+        })
+        .catch(function(err) {
+          showError('Unignore failed: ' + err.message);
+        });
+    }
+
+
+    // ======================================================================
+    // Scan for Changes + Update All
+    // ======================================================================
+
+    /**
+     * Calls scanForChanges API to find diffs between APA source data
+     * and linked calendar events. If changes found, shows a modal
+     * with a summary table. If no changes, shows a toast.
+     */
+    function doScanChanges() {
+      document.getElementById('statusText').textContent = 'Scanning for changes...';
+      document.getElementById('scanChangesBtn').disabled = true;
+
+      SPM.callServer('scanForChanges')
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+
+          var changes = data.changes || [];
+          if (changes.length === 0) {
+            showToast('All linked events are in sync');
+            return;
+          }
+
+          showChangesModal(changes, data.totalChanges || changes.length);
+        })
+        .catch(function(err) {
+          showError('Scan failed: ' + err.message);
+        })
+        .finally(function() {
+          document.getElementById('scanChangesBtn').disabled = false;
+          updateStatusText();
+        });
+    }
+
+    /**
+     * Shows the changes modal with a summary of all diffs found by
+     * scanForChanges. Groups changes by APA event, showing the number
+     * of affected calendar events and each field diff.
+     *
+     * @param {Array} changes - array of change objects from scanForChanges API
+     * @param {number} totalChanges - total number of changes reported
+     */
+    function showChangesModal(changes, totalChanges) {
+      // Group changes by apaEventId so we can show one block per APA event
+      // with the count of affected calendar events
+      var grouped = {};
+      for (var i = 0; i < changes.length; i++) {
+        var ch = changes[i];
+        var key = ch.apaEventId;
+        if (!grouped[key]) {
+          grouped[key] = {
+            apaTitle: ch.apaTitle || 'Untitled',
+            calCount: 0,
+            diffs: ch.diffs || []
+          };
+        }
+        grouped[key].calCount++;
+      }
+
+      // Use wide modal variant for the changes table
+      document.getElementById('modalContent').className = 'eh-modal eh-modal--wide';
+
+      var html = '';
+      html += '<div class="eh-modal-title">Changes Found (' + totalChanges + ')</div>';
+
+      for (var apaId in grouped) {
+        if (!grouped.hasOwnProperty(apaId)) continue;
+        var grp = grouped[apaId];
+
+        html += '<div class="eh-changes-group">';
+        html += '<div class="eh-changes-group-title">' + SPM.esc(grp.apaTitle);
+        html += ' <span class="eh-changes-group-count">(' + grp.calCount + ' calendar event' + (grp.calCount > 1 ? 's' : '') + ')</span>';
+        html += '</div>';
+
+        for (var d = 0; d < grp.diffs.length; d++) {
+          var diff = grp.diffs[d];
+          html += '<div class="eh-changes-diff">';
+          html += '<span class="eh-changes-diff-field">' + SPM.esc(diff.field) + ':</span> ';
+          html += '<span class="eh-changes-diff-old">' + SPM.esc(diff.calValue || '(empty)') + '</span>';
+          html += ' \u2192 ';
+          html += '<span class="eh-changes-diff-new">' + SPM.esc(diff.apaValue || '(empty)') + '</span>';
+          html += '</div>';
+        }
+
+        html += '</div>';
+      }
+
+      html += '<div class="eh-modal-actions">';
+      html += '<button class="eh-modal-btn-cancel" onclick="closeModal()">Cancel</button>';
+      html += '<button class="eh-modal-btn-confirm" onclick="doApplyAllChanges()">Update All</button>';
+      html += '</div>';
+
+      // Stash changes for the Update All action
+      window._pendingChanges = changes;
+
+      document.getElementById('modalContent').innerHTML = html;
+      document.getElementById('modalOverlay').classList.add('active');
+    }
+
+    /**
+     * Applies all pending changes from the scan. Sends the full changes
+     * array to the applyAllChanges API, then refreshes.
+     */
+    function doApplyAllChanges() {
+      var changes = window._pendingChanges;
+      if (!changes || changes.length === 0) return;
+
+      closeModal();
+      document.getElementById('statusText').textContent = 'Applying ' + changes.length + ' changes...';
+
+      SPM.callServer('applyAllChanges', { changes: changes })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          var errList = data.errors || [];
+          if (errList.length > 0) {
+            showError(errList.length + ' updates failed: ' + errList.join('; '));
+          }
+          var updated = data.updated || 0;
+          showToast(updated + ' event' + (updated !== 1 ? 's' : '') + ' updated');
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Apply changes failed: ' + err.message);
+        })
+        .finally(function() {
+          window._pendingChanges = null;
         });
     }
 
@@ -2031,12 +2419,43 @@
         loadSyncStatus();
       });
 
+      // -- Wire up Scan Changes button --
+      document.getElementById('scanChangesBtn').addEventListener('click', function() {
+        doScanChanges();
+      });
+
       // -- Wire up filter inputs --
       document.getElementById('filterApa').addEventListener('input', function() {
         renderApaColumn(this.value);
       });
       document.getElementById('filterCal').addEventListener('input', function() {
         renderCalColumn(this.value);
+      });
+
+      // -- Wire up filter toggle buttons --
+
+      // Hide Linked toggle — APA column
+      document.getElementById('toggleHideLinkedApa').addEventListener('click', function() {
+        hideLinkedApa = !hideLinkedApa;
+        this.classList.toggle('active', hideLinkedApa);
+        this.textContent = hideLinkedApa ? 'Show All' : 'Hide Linked';
+        renderApaColumn(document.getElementById('filterApa').value);
+      });
+
+      // Hide Linked toggle — Calendar column
+      document.getElementById('toggleHideLinkedCal').addEventListener('click', function() {
+        hideLinkedCal = !hideLinkedCal;
+        this.classList.toggle('active', hideLinkedCal);
+        this.textContent = hideLinkedCal ? 'Show All' : 'Hide Linked';
+        renderCalColumn(document.getElementById('filterCal').value);
+      });
+
+      // Hide Ignored toggle — APA column (default: ON)
+      document.getElementById('toggleHideIgnored').addEventListener('click', function() {
+        hideIgnored = !hideIgnored;
+        this.classList.toggle('active', hideIgnored);
+        this.textContent = hideIgnored ? 'Hide Ignored' : 'Show Ignored';
+        renderApaColumn(document.getElementById('filterApa').value);
       });
 
       // -- Wire up linking mode cancel --
@@ -2067,8 +2486,9 @@
         }
       });
 
-      // -- Initial load --
+      // -- Initial load: sync status + ignored list in parallel --
       loadSyncStatus();
+      loadIgnoredEvents();
     });
   </script>
 
