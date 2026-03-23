@@ -23,10 +23,14 @@
 
   API ROUTES (via SPM.callServer):
     getSyncStatus        — returns { syncItems[] } with sync comparison data
-    createCalendarEvent  — creates a Google Calendar event from APA event
-    linkEvents           — links APA event to existing calendar event
+    createCalendarEvent  — creates Google Calendar event(s) from APA event
+                           returns { created: N, calendarEventIds: [...] }
+    batchLinkEvents      — links multiple calendar events to one APA event
+                           + optionally updates fields (title/location/desc)
     updateCalendarEvent  — updates linked calendar event with APA data
     unlinkEvent          — removes link between APA and calendar events
+    linkEvents           — links one APA event to one calendar event (used
+                           internally by batchLinkEvents)
 
   SYNC ITEM SHAPE (from getSyncStatus):
     status:       'linked' | 'unlinked' | 'calendar_only'
@@ -38,16 +42,23 @@
                     location (string), description, isAllDay }
 
   THREE-COLUMN LAYOUT:
-    Left:   APA Events — all items with apaEvent. Linked ones faded.
-    Center: Linked Pairs — linked items (with or without needsUpdate).
+    Left:   APA Events — deduplicated by apaEventId. Linked ones faded.
+    Center: Linked groups — linked items grouped by apaEventId (1:many).
     Right:  Calendar Events — all items with calendarEvent. Linked ones faded.
 
-  LINKING FLOW:
+  LINKING FLOW (multi-select checkbox mode):
     1. User clicks "Link ▸" on an APA event card
-    2. Card gets blue selected border, banner appears at top
-    3. Calendar column cards become clickable with hover effect
-    4. User clicks a calendar event → linkEvents API → refresh
-    5. Cancel returns to normal state
+    2. APA card gets blue selected border, banner appears at top
+    3. Calendar column switches to checkbox mode:
+       - Unlinked cards get checkboxes (unchecked by default)
+       - Linked/faded cards stay faded, no checkbox
+       - Clicking a card toggles its checkbox
+       - Selected cards get a blue left border
+    4. Sticky "Link Selected (N)" button at bottom of calendar column
+    5. Clicking "Link Selected" opens field preview modal
+    6. Modal shows which fields (title/location/description) to copy
+    7. "Link & Update" calls batchLinkEvents API
+    8. Cancel or Escape exits linking mode
 
   DESKTOP ONLY:
     No mobile/tablet responsive code. No device detection.
@@ -337,14 +348,16 @@
       margin-bottom: 4px;
     }
 
-    /* Selected card (linking mode) */
+    /* Selected card (linking mode — the APA card being linked) */
     .eh-event-card.is-selected {
       border-color: var(--spm-accent);
       box-shadow: 0 0 0 2px rgba(0, 49, 161, 0.2);
       opacity: 1;
     }
 
-    /* Clickable card in linking mode (calendar column) */
+    /* -- Checkbox mode for calendar cards during linking ----------------- */
+
+    /* In linking mode, unlinked calendar cards are clickable */
     .eh-col--cal.linking-mode .eh-event-card:not(.is-linked) {
       cursor: pointer;
     }
@@ -354,7 +367,65 @@
       background: #f0f7ff;
     }
 
-    /* -- Linked pair card (center column) ------------------------------- */
+    /* Calendar card checkbox (shown only in linking mode) */
+    .eh-cal-checkbox {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .eh-cal-checkbox input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      flex-shrink: 0;
+      cursor: pointer;
+      accent-color: var(--spm-accent);
+    }
+    .eh-cal-checkbox-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* Calendar card selected via checkbox — blue left border */
+    .eh-event-card.is-check-selected {
+      border-left: 4px solid var(--spm-accent);
+      background: #f8faff;
+    }
+
+    /* Sticky "Link Selected" button at bottom of calendar column */
+    .eh-link-selected-bar {
+      display: none;
+      padding: 8px 12px;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .eh-link-selected-bar.active {
+      display: block;
+    }
+    .eh-btn-link-selected {
+      width: 100%;
+      padding: 10px 16px;
+      border-radius: 999px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      cursor: pointer;
+      min-height: 44px;
+      font-family: inherit;
+      background: var(--spm-accent);
+      color: #fff;
+      border: none;
+      transition: background 0.15s, opacity 0.15s;
+    }
+    .eh-btn-link-selected:hover:not(:disabled) {
+      background: #002480;
+    }
+    .eh-btn-link-selected:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* -- Linked group card (center column, 1:many) ---------------------- */
     .eh-pair-card {
       background: var(--card);
       border: 2px solid var(--border);
@@ -399,50 +470,60 @@
       flex-shrink: 0;
     }
 
-    /* Side-by-side event panels inside pair card */
-    .eh-pair-sides {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .eh-pair-side {
-      padding: 8px;
-      border-radius: 8px;
-      background: var(--bg);
-      border: 1px solid var(--border);
-    }
-    .eh-pair-side-label {
-      font-size: 0.625rem;
+    /* APA source info inside group card */
+    .eh-group-apa-label {
+      font-size: 0.6875rem;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.04em;
       color: var(--muted);
       margin-bottom: 4px;
     }
-    .eh-pair-field {
+    .eh-group-apa-title {
+      font-size: 0.8125rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .eh-group-apa-meta {
       font-size: 0.75rem;
-      line-height: 1.4;
-      margin-bottom: 2px;
-    }
-    .eh-pair-field-label {
-      font-weight: 700;
       color: var(--muted);
-      font-size: 0.6875rem;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    .eh-pair-field-value {
-      font-weight: 500;
-    }
-    .eh-pair-field-diff {
-      color: #9a3412;
-      background: #ffedd5;
-      padding: 0 4px;
-      border-radius: 4px;
+      margin-bottom: 8px;
     }
 
-    /* Pair card actions */
+    /* Linked-to label */
+    .eh-group-linked-label {
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .eh-group-linked-label .arrow {
+      font-size: 0.875rem;
+      color: #166534;
+    }
+
+    /* Calendar event list inside group card */
+    .eh-group-cal-list {
+      list-style: none;
+      margin: 0 0 8px 0;
+      padding: 0;
+    }
+    .eh-group-cal-list li {
+      font-size: 0.75rem;
+      padding: 4px 8px;
+      border-left: 3px solid var(--spm-accent);
+      margin-bottom: 4px;
+      background: var(--bg);
+      border-radius: 0 4px 4px 0;
+      line-height: 1.4;
+    }
+
+    /* Pair card actions (center column) */
     .eh-pair-actions {
       display: flex;
       gap: 8px;
@@ -472,6 +553,117 @@
     }
     .eh-btn-unlink:hover {
       background: #f3f4f6;
+    }
+
+    /* -- Field preview modal (shown before batchLink) ------------------- */
+    .eh-modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 9000;
+      align-items: center;
+      justify-content: center;
+    }
+    .eh-modal-overlay.active {
+      display: flex;
+    }
+    .eh-modal {
+      background: var(--card);
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 520px;
+      width: 90%;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+    }
+    .eh-modal-title {
+      font-size: 1rem;
+      font-weight: 800;
+      margin-bottom: 16px;
+      line-height: 1.4;
+    }
+    .eh-modal-section-label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .eh-modal-field {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .eh-modal-field:last-of-type {
+      border-bottom: none;
+    }
+    .eh-modal-field input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      margin-top: 2px;
+      flex-shrink: 0;
+      accent-color: var(--spm-accent);
+    }
+    .eh-modal-field-label {
+      font-size: 0.8125rem;
+      font-weight: 700;
+      color: var(--muted);
+      min-width: 80px;
+      flex-shrink: 0;
+    }
+    .eh-modal-field-value {
+      font-size: 0.8125rem;
+      font-weight: 500;
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
+    }
+    .eh-modal-field-value.is-empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+    .eh-modal-note {
+      font-size: 0.75rem;
+      color: var(--muted);
+      font-style: italic;
+      margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .eh-modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .eh-modal-actions button {
+      padding: 8px 20px;
+      border-radius: 999px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      cursor: pointer;
+      min-height: 40px;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+    .eh-modal-btn-cancel {
+      background: #fff;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .eh-modal-btn-cancel:hover {
+      background: var(--bg);
+    }
+    .eh-modal-btn-confirm {
+      background: var(--spm-accent);
+      color: #fff;
+      border: none;
+    }
+    .eh-modal-btn-confirm:hover {
+      background: #002480;
     }
 
     /* -- Skeleton loaders ----------------------------------------------- */
@@ -578,7 +770,7 @@
 
       <!-- Linking mode banner -->
       <div class="eh-link-banner" id="linkBanner">
-        <span id="linkBannerText">Select a calendar event to link to...</span>
+        <span id="linkBannerText">Select calendar events to link to...</span>
         <button class="eh-link-banner-cancel" id="linkBannerCancel">Cancel</button>
       </div>
 
@@ -601,7 +793,7 @@
           </div>
         </div>
 
-        <!-- CENTER: Linked Pairs -->
+        <!-- CENTER: Linked Groups -->
         <div class="eh-col eh-col--linked" id="colLinked">
           <div class="eh-col-header">
             <span>Linked</span>
@@ -627,6 +819,10 @@
             <div class="eh-skeleton"></div>
             <div class="eh-skeleton"></div>
           </div>
+          <!-- Sticky "Link Selected" bar (only visible in linking mode) -->
+          <div class="eh-link-selected-bar" id="linkSelectedBar">
+            <button class="eh-btn-link-selected" id="linkSelectedBtn" disabled>Link Selected (0)</button>
+          </div>
         </div>
 
       </div><!-- end eh-grid -->
@@ -639,6 +835,15 @@
   <!-- Toast -->
   <!-- ================================================================== -->
   <div class="eh-toast" id="toast"></div>
+
+  <!-- ================================================================== -->
+  <!-- Field Preview Modal (shown before batchLinkEvents) -->
+  <!-- ================================================================== -->
+  <div class="eh-modal-overlay" id="modalOverlay">
+    <div class="eh-modal" id="modalContent">
+      <!-- Populated dynamically by showFieldPreviewModal() -->
+    </div>
+  </div>
 
   <!-- ================================================================== -->
   <!-- Scripts -->
@@ -664,8 +869,8 @@
     // ======================================================================
     //
     // Desktop-only admin dashboard. Three independently scrollable columns:
-    //   Left:   APA events (all items with apaEvent)
-    //   Center: Linked pairs (status=linked items)
+    //   Left:   APA events (deduplicated by apaEventId)
+    //   Center: Linked groups (linked items grouped by apaEventId, 1:many)
     //   Right:  Calendar events (all items with calendarEvent)
     //
     // DEPENDENCIES:
@@ -673,15 +878,17 @@
     //   - spm-base.css: card, button, badge, header classes
     //
     // DATA FLOW:
-    //   1. On load → getSyncStatus → split into 3 lists → render columns
-    //   2. User action → create / link / update / unlink API call
-    //   3. After action → toast + full refresh (getSyncStatus again)
+    //   1. On load -> getSyncStatus -> split into 3 lists -> render columns
+    //   2. User action -> create / batchLink / update / unlink API call
+    //   3. After action -> toast + full refresh (getSyncStatus again)
     //
-    // LINKING FLOW:
-    //   1. User clicks "Link ▸" on APA card → enters linking mode
-    //   2. Banner shown, calendar cards become clickable
-    //   3. Click calendar card → linkEvents API → refresh
-    //   4. Cancel exits linking mode
+    // LINKING FLOW (multi-select checkbox mode):
+    //   1. User clicks "Link >" on APA card -> enters linking mode
+    //   2. Banner shown, calendar cards get checkboxes
+    //   3. User checks desired calendar events
+    //   4. Click "Link Selected (N)" -> field preview modal
+    //   5. Confirm in modal -> batchLinkEvents API -> refresh
+    //   6. Cancel exits linking mode
     //
     // ======================================================================
 
@@ -692,8 +899,8 @@
     var syncItems = [];
 
     /** Derived lists for the three columns */
-    var apaList = [];       // All items with apaEvent (linked + unlinked)
-    var linkedList = [];    // Items with status=linked (includes needsUpdate)
+    var apaList = [];       // Deduplicated APA events (one per apaEventId)
+    var linkedGroups = [];  // Grouped linked items: { apaEvent, calEvents[] }
     var calList = [];       // All items with calendarEvent (linked + calendar_only)
 
     /** Set of linked apaEventIds for quick lookup */
@@ -705,8 +912,14 @@
     /** Linking mode state: the apaEventId being linked, or null */
     var linkingApaEventId = null;
 
+    /** Linking mode: the full APA event object (for modal display) */
+    var linkingApaEvent = null;
+
     /** Linking mode: the APA event title (for the banner) */
     var linkingApaTitle = '';
+
+    /** Linking mode: set of checked calendarEventIds */
+    var checkedCalIds = {};
 
 
     // ======================================================================
@@ -750,6 +963,19 @@
         month: 'short',
         day: 'numeric'
       });
+    }
+
+    /**
+     * Formats a short date with day name for linked group display: "Nov 4".
+     *
+     * @param {string} dateStr - ISO date string
+     * @returns {string} e.g. "Nov 4"
+     */
+    function formatShortDateWithTime(dateStr, endStr) {
+      var date = formatShortDate(dateStr);
+      var time = formatTimeRange(dateStr, endStr);
+      if (date && time) return date + ', ' + time;
+      return date || '';
     }
 
     /**
@@ -798,10 +1024,31 @@
       if (!str) return '';
       // Date-only strings (all-day events) have no 'T'
       if (str.indexOf('T') === -1) return '';
-      // "2026-03-28T09:00:00-07:00" → "09:00"
+      // "2026-03-28T09:00:00-07:00" -> "09:00"
       var timePart = str.split('T')[1];
       if (!timePart) return '';
       return timePart.substring(0, 5);
+    }
+
+    /**
+     * Calculates the number of days an event spans.
+     * Returns 1 for single-day events, N for multi-day.
+     *
+     * @param {string} startStr - ISO date/datetime string
+     * @param {string} endStr - ISO date/datetime string
+     * @returns {number} number of days
+     */
+    function getEventDayCount(startStr, endStr) {
+      if (!startStr || !endStr) return 1;
+      var startDate = startStr.split('T')[0];
+      var endDate = endStr.split('T')[0];
+      if (startDate === endDate) return 1;
+      var sParts = startDate.split('-');
+      var eParts = endDate.split('-');
+      var s = new Date(parseInt(sParts[0], 10), parseInt(sParts[1], 10) - 1, parseInt(sParts[2], 10));
+      var e = new Date(parseInt(eParts[0], 10), parseInt(eParts[1], 10) - 1, parseInt(eParts[2], 10));
+      var diff = Math.round((e - s) / (1000 * 60 * 60 * 24));
+      return Math.max(1, diff + 1);
     }
 
 
@@ -831,31 +1078,61 @@
     /**
      * Splits raw syncItems into the three column lists and builds lookup
      * sets for linked IDs. Called after each getSyncStatus response.
+     *
+     * Key behavior:
+     *   - APA list is deduplicated by apaEventId (multiple linked items
+     *     for the same APA event are merged into one entry).
+     *   - Linked items are GROUPED by apaEventId into linkedGroups[],
+     *     where each group has one apaEvent and N calendarEvents.
+     *   - Calendar list includes all items with a calendarEvent.
      */
     function processSyncItems() {
       apaList = [];
-      linkedList = [];
+      linkedGroups = [];
       calList = [];
       linkedApaIds = {};
       linkedCalIds = {};
 
+      // Temporary maps for deduplication and grouping
+      var apaSeenIds = {};      // apaEventId -> true (for dedup)
+      var linkedGroupMap = {};  // apaEventId -> { apaEvent, calEvents[], needsUpdate, diffs[] }
+
       for (var i = 0; i < syncItems.length; i++) {
         var item = syncItems[i];
 
-        // Build linked ID lookup sets
+        // Build linked ID lookup sets and group linked items
         if (item.status === 'linked' && item.apaEvent && item.calendarEvent) {
           linkedApaIds[item.apaEvent.apaEventId] = true;
           linkedCalIds[item.calendarEvent.calendarEventId] = true;
+
+          var groupKey = item.apaEvent.apaEventId;
+          if (!linkedGroupMap[groupKey]) {
+            linkedGroupMap[groupKey] = {
+              apaEvent: item.apaEvent,
+              calEvents: [],
+              needsUpdate: false,
+              diffs: []
+            };
+          }
+          linkedGroupMap[groupKey].calEvents.push(item.calendarEvent);
+          // If any linked item needs update, the group needs update
+          if (item.needsUpdate) {
+            linkedGroupMap[groupKey].needsUpdate = true;
+            // Merge diffs (union of all diff fields)
+            var existingDiffs = linkedGroupMap[groupKey].diffs;
+            var newDiffs = item.diffs || [];
+            for (var d = 0; d < newDiffs.length; d++) {
+              if (existingDiffs.indexOf(newDiffs[d]) === -1) {
+                existingDiffs.push(newDiffs[d]);
+              }
+            }
+          }
         }
 
-        // Left column: all items that have an apaEvent
-        if (item.apaEvent) {
+        // Left column: deduplicated APA events
+        if (item.apaEvent && !apaSeenIds[item.apaEvent.apaEventId]) {
+          apaSeenIds[item.apaEvent.apaEventId] = true;
           apaList.push(item);
-        }
-
-        // Center column: linked items only
-        if (item.status === 'linked') {
-          linkedList.push(item);
         }
 
         // Right column: all items that have a calendarEvent
@@ -864,15 +1141,28 @@
         }
       }
 
+      // Convert linkedGroupMap to sorted array
+      for (var key in linkedGroupMap) {
+        if (linkedGroupMap.hasOwnProperty(key)) {
+          linkedGroups.push(linkedGroupMap[key]);
+        }
+      }
+
       // Sort each list by date ascending
       var dateSorter = function(a, b) {
-        var da = a.sortDate || (a.apaEvent && a.apaEvent.start) || (a.calendarEvent && a.calendarEvent.start) || '';
-        var db = b.sortDate || (b.apaEvent && b.apaEvent.start) || (b.calendarEvent && b.calendarEvent.start) || '';
+        var da = (a.apaEvent && a.apaEvent.start) || (a.calendarEvent && a.calendarEvent.start) || '';
+        var db = (b.apaEvent && b.apaEvent.start) || (b.calendarEvent && b.calendarEvent.start) || '';
         return da.localeCompare(db);
       };
       apaList.sort(dateSorter);
-      linkedList.sort(dateSorter);
       calList.sort(dateSorter);
+
+      // Sort linked groups by APA event start date
+      linkedGroups.sort(function(a, b) {
+        var da = (a.apaEvent && a.apaEvent.start) || '';
+        var db = (b.apaEvent && b.apaEvent.start) || '';
+        return da.localeCompare(db);
+      });
     }
 
 
@@ -881,8 +1171,10 @@
     // ======================================================================
 
     /**
-     * Renders the APA events column. Unlinked events get action buttons.
-     * Linked events are faded with a "Linked" badge.
+     * Renders the APA events column. Unlinked events get action buttons
+     * (Create New, Link >). Linked events are faded with a "Linked" badge.
+     *
+     * Multi-day APA events show "Create New (N days)" instead of "Create New".
      *
      * @param {string} filter - search filter (case-insensitive)
      */
@@ -929,6 +1221,13 @@
         html += '<div class="eh-event-card-meta">';
         if (evt.start) {
           html += '<div>' + SPM.esc(formatShortDate(evt.start));
+          // Show end date if multi-day
+          if (evt.end) {
+            var dayCount = getEventDayCount(evt.start, evt.end);
+            if (dayCount > 1) {
+              html += ' \u2013 ' + SPM.esc(formatShortDate(evt.end));
+            }
+          }
           var timeRange = formatTimeRange(evt.start, evt.end);
           if (timeRange) html += ' &middot; ' + SPM.esc(timeRange);
           html += '</div>';
@@ -945,8 +1244,14 @@
         // Action buttons (only for unlinked)
         if (!isLinked) {
           html += '<div class="eh-event-card-actions">';
-          html += '<button class="eh-btn-create" onclick="doCreate(\'' + SPM.esc(evt.apaEventId) + '\')">Create New</button>';
-          html += '<button class="eh-btn-link" onclick="enterLinkingMode(\'' + SPM.esc(evt.apaEventId) + '\', \'' + SPM.esc((evt.title || '').replace(/'/g, "\\'")) + '\')">Link \u25b8</button>';
+
+          // Create New — show day count for multi-day events
+          var dayCount = getEventDayCount(evt.start, evt.end);
+          var createLabel = dayCount > 1 ? 'Create New (' + dayCount + ' days)' : 'Create New';
+          html += '<button class="eh-btn-create" onclick="doCreate(\'' + SPM.esc(evt.apaEventId) + '\', ' + dayCount + ')">' + SPM.esc(createLabel) + '</button>';
+
+          // Link > button
+          html += '<button class="eh-btn-link" onclick="enterLinkingMode(\'' + SPM.esc(evt.apaEventId) + '\')">Link \u25b8</button>';
           html += '</div>';
         }
 
@@ -958,77 +1263,96 @@
 
 
     // ======================================================================
-    // Rendering — Center Column (Linked Pairs)
+    // Rendering — Center Column (Linked Groups, 1:many)
     // ======================================================================
 
     /**
-     * Renders the linked pairs column. Each card shows APA ↔ Calendar
-     * side by side. Items with needsUpdate get an orange badge and Update button.
+     * Renders the linked groups column. Each card represents one APA event
+     * linked to one or more calendar events. Shows APA title/meta at top,
+     * then a list of linked calendar event date/times.
+     *
+     * Single-link groups show Update + Unlink.
+     * Multi-link groups show Update All + Unlink All.
      */
     function renderLinkedColumn() {
       var container = document.getElementById('listLinked');
 
-      // Count: linked with needsUpdate + linked without
-      var needsUpdateCount = 0;
-      for (var n = 0; n < linkedList.length; n++) {
-        if (linkedList[n].needsUpdate) needsUpdateCount++;
+      // Count total linked calendar events for the header badge
+      var totalLinked = 0;
+      for (var g = 0; g < linkedGroups.length; g++) {
+        totalLinked += linkedGroups[g].calEvents.length;
       }
-      document.getElementById('countLinked').textContent = linkedList.length;
+      document.getElementById('countLinked').textContent = totalLinked;
 
-      if (linkedList.length === 0) {
+      if (linkedGroups.length === 0) {
         container.innerHTML = '<div class="eh-empty">No linked events yet.</div>';
         return;
       }
 
-      var html = '';
       // Sort: needsUpdate first
-      var sorted = linkedList.slice().sort(function(a, b) {
+      var sorted = linkedGroups.slice().sort(function(a, b) {
         if (a.needsUpdate && !b.needsUpdate) return -1;
         if (!a.needsUpdate && b.needsUpdate) return 1;
         return 0;
       });
 
+      var html = '';
       for (var i = 0; i < sorted.length; i++) {
-        var item = sorted[i];
-        var apa = item.apaEvent;
-        var cal = item.calendarEvent;
+        var group = sorted[i];
+        var apa = group.apaEvent;
+        var calEvents = group.calEvents;
+        var isMulti = calEvents.length > 1;
 
         html += '<div class="eh-pair-card">';
 
         // Header: title + badge
         html += '<div class="eh-pair-card-header">';
-        html += '<div class="eh-pair-card-title">' + SPM.esc(apa ? apa.title : (cal ? cal.title : 'Untitled')) + '</div>';
-        if (item.needsUpdate) {
+        html += '<div class="eh-pair-card-title">' + SPM.esc(apa.title || 'Untitled') + '</div>';
+        if (group.needsUpdate) {
           html += '<span class="eh-pair-badge-update">Needs Update</span>';
         } else {
           html += '<span class="eh-pair-badge-linked">Linked</span>';
         }
         html += '</div>';
 
-        // Side-by-side panels
-        html += '<div class="eh-pair-sides">';
-
-        // APA side
-        html += '<div class="eh-pair-side">';
-        html += '<div class="eh-pair-side-label">APA Event</div>';
-        html += renderPairFields(apa, item.diffs, 'apa');
+        // APA source info
+        html += '<div class="eh-group-apa-label">APA Event</div>';
+        html += '<div class="eh-group-apa-meta">';
+        var apaLoc = formatLocation(apa.location);
+        if (apaLoc) html += '<div>' + SPM.esc(apaLoc) + '</div>';
+        if (apa.organizer) html += '<div>' + SPM.esc(apa.organizer) + '</div>';
         html += '</div>';
 
-        // Calendar side
-        html += '<div class="eh-pair-side">';
-        html += '<div class="eh-pair-side-label">Google Calendar</div>';
-        html += renderPairFields(cal, item.diffs, 'cal');
+        // Linked calendar events list
+        html += '<div class="eh-group-linked-label">';
+        html += '<span class="arrow">\u2193</span> linked to ' + calEvents.length + ' calendar event' + (isMulti ? 's' : '') + ':';
         html += '</div>';
 
-        html += '</div>'; // end sides
+        // Sort calEvents by start date
+        var sortedCals = calEvents.slice().sort(function(a, b) {
+          return (a.start || '').localeCompare(b.start || '');
+        });
+
+        html += '<ul class="eh-group-cal-list">';
+        for (var c = 0; c < sortedCals.length; c++) {
+          var cal = sortedCals[c];
+          html += '<li>' + SPM.esc(formatShortDateWithTime(cal.start, cal.end)) + '</li>';
+        }
+        html += '</ul>';
 
         // Actions
         html += '<div class="eh-pair-actions">';
-        if (item.needsUpdate && apa && cal) {
-          html += '<button class="eh-btn-update" onclick="doUpdate(\'' + SPM.esc(cal.calendarEventId) + '\', \'' + SPM.esc(apa.apaEventId) + '\')">Update</button>';
-        }
-        if (cal) {
-          html += '<button class="eh-btn-unlink" onclick="doUnlink(\'' + SPM.esc(cal.calendarEventId) + '\')">Unlink</button>';
+        if (isMulti) {
+          // Multi-link: Update All / Unlink All
+          html += '<button class="eh-btn-update" onclick="doUpdateAll(\'' + SPM.esc(apa.apaEventId) + '\')">Update All</button>';
+          html += '<button class="eh-btn-unlink" onclick="doUnlinkAll(\'' + SPM.esc(apa.apaEventId) + '\')">Unlink All</button>';
+        } else {
+          // Single link: Update / Unlink
+          var singleCal = sortedCals[0];
+          if (group.needsUpdate) {
+            html += '<button class="eh-btn-update" onclick="doUpdate(\'' + SPM.esc(singleCal.calendarEventId) + '\', \'' + SPM.esc(apa.apaEventId) + '\')">Update</button>';
+          }
+          html += '<button class="eh-btn-unlink" onclick="doUnlink(\'' + SPM.esc(singleCal.calendarEventId) + '\')">Unlink</button>';
         }
         html += '</div>';
 
@@ -1038,47 +1362,6 @@
       container.innerHTML = html;
     }
 
-    /**
-     * Renders the field rows for one side of a pair card.
-     * Highlights fields that differ (listed in diffs[]).
-     *
-     * @param {Object} evt - event object (apa or calendar)
-     * @param {string[]} diffs - field names that differ
-     * @param {string} side - 'apa' or 'cal' (determines field name mapping)
-     * @returns {string} HTML
-     */
-    function renderPairFields(evt, diffs, side) {
-      if (!evt) return '<div style="color:var(--muted); font-style:italic; font-size:0.75rem;">No data</div>';
-      diffs = diffs || [];
-
-      var html = '';
-
-      // Title
-      var title = evt.title || '';
-      var titleDiff = diffs.indexOf('title') !== -1;
-      html += '<div class="eh-pair-field"><span class="eh-pair-field-value' + (titleDiff ? ' eh-pair-field-diff' : '') + '" style="font-weight:700;">' + SPM.esc(title) + '</span></div>';
-
-      // Date + time
-      var startStr = evt.start || '';
-      if (startStr) {
-        var dateDiff = diffs.indexOf('start') !== -1;
-        html += '<div class="eh-pair-field"><span class="eh-pair-field-label">Date </span><span class="eh-pair-field-value' + (dateDiff ? ' eh-pair-field-diff' : '') + '">' + SPM.esc(formatShortDate(startStr)) + '</span></div>';
-        var timeRange = formatTimeRange(startStr, evt.end || '');
-        if (timeRange) {
-          html += '<div class="eh-pair-field"><span class="eh-pair-field-label">Time </span><span class="eh-pair-field-value' + (dateDiff ? ' eh-pair-field-diff' : '') + '">' + SPM.esc(timeRange) + '</span></div>';
-        }
-      }
-
-      // Location
-      var loc = formatLocation(evt.location);
-      if (loc) {
-        var locDiff = diffs.indexOf('location') !== -1;
-        html += '<div class="eh-pair-field"><span class="eh-pair-field-label">Location </span><span class="eh-pair-field-value' + (locDiff ? ' eh-pair-field-diff' : '') + '">' + SPM.esc(loc) + '</span></div>';
-      }
-
-      return html;
-    }
-
 
     // ======================================================================
     // Rendering — Right Column (Calendar Events)
@@ -1086,7 +1369,7 @@
 
     /**
      * Renders the Google Calendar events column. Linked events are faded.
-     * When in linking mode, unlinked cards become clickable.
+     * In linking mode, unlinked cards get checkboxes for multi-select.
      *
      * @param {string} filter - search filter (case-insensitive)
      */
@@ -1108,22 +1391,33 @@
         return;
       }
 
+      var inLinkingMode = !!linkingApaEventId;
       var html = '';
+
       for (var i = 0; i < filtered.length; i++) {
         var item = filtered[i];
         var evt = item.calendarEvent;
         var isLinked = !!linkedCalIds[evt.calendarEventId];
+        var isChecked = !!checkedCalIds[evt.calendarEventId];
 
         var cardClass = 'eh-event-card';
         if (isLinked) cardClass += ' is-linked';
+        if (isChecked) cardClass += ' is-check-selected';
 
-        // In linking mode, unlinked calendar cards are clickable
+        // In linking mode, unlinked cards are clickable to toggle checkbox
         var onclick = '';
-        if (linkingApaEventId && !isLinked) {
-          onclick = ' onclick="doLink(\'' + SPM.esc(linkingApaEventId) + '\', \'' + SPM.esc(evt.calendarEventId) + '\')"';
+        if (inLinkingMode && !isLinked) {
+          onclick = ' onclick="toggleCalCheckbox(\'' + SPM.esc(evt.calendarEventId) + '\')"';
         }
 
         html += '<div class="' + cardClass + '" data-cal-id="' + SPM.esc(evt.calendarEventId) + '"' + onclick + '>';
+
+        // Checkbox mode: show checkbox for unlinked cards in linking mode
+        if (inLinkingMode && !isLinked) {
+          html += '<div class="eh-cal-checkbox">';
+          html += '<input type="checkbox"' + (isChecked ? ' checked' : '') + ' onclick="event.stopPropagation(); toggleCalCheckbox(\'' + SPM.esc(evt.calendarEventId) + '\')" />';
+          html += '<div class="eh-cal-checkbox-content">';
+        }
 
         // Linked badge
         if (isLinked) {
@@ -1145,6 +1439,12 @@
           html += '<div>' + SPM.esc(evt.location) + '</div>';
         }
         html += '</div>'; // end meta
+
+        // Close checkbox wrapper if in linking mode
+        if (inLinkingMode && !isLinked) {
+          html += '</div>'; // end eh-cal-checkbox-content
+          html += '</div>'; // end eh-cal-checkbox
+        }
 
         html += '</div>'; // end card
       }
@@ -1170,10 +1470,14 @@
 
       // Update linking mode visual state on calendar column
       var colCal = document.getElementById('colCal');
+      var linkBar = document.getElementById('linkSelectedBar');
       if (linkingApaEventId) {
         colCal.classList.add('linking-mode');
+        linkBar.classList.add('active');
+        updateLinkSelectedButton();
       } else {
         colCal.classList.remove('linking-mode');
+        linkBar.classList.remove('active');
       }
 
       // Update status text
@@ -1185,55 +1489,170 @@
      */
     function updateStatusText() {
       var needsUpdate = 0;
-      for (var i = 0; i < linkedList.length; i++) {
-        if (linkedList[i].needsUpdate) needsUpdate++;
+      for (var i = 0; i < linkedGroups.length; i++) {
+        if (linkedGroups[i].needsUpdate) needsUpdate++;
+      }
+      var totalLinked = 0;
+      for (var j = 0; j < linkedGroups.length; j++) {
+        totalLinked += linkedGroups[j].calEvents.length;
       }
       var parts = [];
       parts.push(apaList.length + ' APA');
       parts.push(calList.length + ' calendar');
-      parts.push(linkedList.length + ' linked');
+      parts.push(totalLinked + ' linked');
       if (needsUpdate) parts.push(needsUpdate + ' need update');
       document.getElementById('statusText').textContent = parts.join(' \u00b7 ');
     }
 
 
     // ======================================================================
-    // Linking Mode
+    // Linking Mode (Multi-Select Checkbox)
     // ======================================================================
 
     /**
      * Enters linking mode: highlights the selected APA card, shows
-     * the linking banner, and makes calendar cards clickable.
+     * the linking banner, and switches calendar cards to checkbox mode.
      *
      * @param {string} apaEventId - the APA event ID to link
-     * @param {string} apaTitle - the APA event title (for the banner)
      */
-    function enterLinkingMode(apaEventId, apaTitle) {
+    function enterLinkingMode(apaEventId) {
+      // Find the full APA event object
+      var apaEvent = null;
+      for (var i = 0; i < apaList.length; i++) {
+        if (apaList[i].apaEvent && apaList[i].apaEvent.apaEventId === apaEventId) {
+          apaEvent = apaList[i].apaEvent;
+          break;
+        }
+      }
+      if (!apaEvent) return;
+
       linkingApaEventId = apaEventId;
-      linkingApaTitle = apaTitle;
+      linkingApaEvent = apaEvent;
+      linkingApaTitle = apaEvent.title || 'Untitled';
+      checkedCalIds = {};
 
       // Show banner
       var banner = document.getElementById('linkBanner');
-      document.getElementById('linkBannerText').textContent = 'Select a calendar event to link to "' + apaTitle + '"';
+      document.getElementById('linkBannerText').textContent = 'Select calendar events to link to: ' + linkingApaTitle;
       banner.classList.add('active');
 
-      // Re-render to apply selected state and clickable calendar cards
+      // Re-render to apply selected state and checkbox mode
       renderAll();
     }
 
     /**
      * Exits linking mode: removes selection, hides banner, restores
-     * normal calendar card behavior.
+     * normal calendar card behavior. Clears checkbox state.
      */
     function exitLinkingMode() {
       linkingApaEventId = null;
+      linkingApaEvent = null;
       linkingApaTitle = '';
+      checkedCalIds = {};
 
       // Hide banner
       document.getElementById('linkBanner').classList.remove('active');
 
       // Re-render to remove selected state
       renderAll();
+    }
+
+    /**
+     * Toggles a calendar event's checkbox in linking mode.
+     * Updates the "Link Selected (N)" button count.
+     *
+     * @param {string} calendarEventId - the calendar event ID to toggle
+     */
+    function toggleCalCheckbox(calendarEventId) {
+      if (checkedCalIds[calendarEventId]) {
+        delete checkedCalIds[calendarEventId];
+      } else {
+        checkedCalIds[calendarEventId] = true;
+      }
+
+      // Re-render calendar column to update checkbox states
+      var calFilter = document.getElementById('filterCal').value;
+      renderCalColumn(calFilter);
+      updateLinkSelectedButton();
+    }
+
+    /**
+     * Updates the "Link Selected (N)" button text and disabled state
+     * based on the number of checked calendar events.
+     */
+    function updateLinkSelectedButton() {
+      var count = Object.keys(checkedCalIds).length;
+      var btn = document.getElementById('linkSelectedBtn');
+      btn.textContent = 'Link Selected (' + count + ')';
+      btn.disabled = count === 0;
+    }
+
+
+    // ======================================================================
+    // Field Preview Modal
+    // ======================================================================
+
+    /**
+     * Shows the field preview modal before calling batchLinkEvents.
+     * Displays which fields will be copied from APA to calendar events,
+     * with checkboxes to include/exclude each field.
+     */
+    function showFieldPreviewModal() {
+      if (!linkingApaEvent) return;
+
+      var checkedIds = Object.keys(checkedCalIds);
+      if (checkedIds.length === 0) return;
+
+      var apa = linkingApaEvent;
+      var title = apa.title || '';
+      var loc = formatLocation(apa.location);
+      var desc = apa.description || '';
+
+      var html = '';
+      html += '<div class="eh-modal-title">Link "' + SPM.esc(title || 'Untitled') + '" to ' + checkedIds.length + ' calendar event' + (checkedIds.length > 1 ? 's' : '') + '</div>';
+
+      html += '<div class="eh-modal-section-label">Fields to copy from APA to calendar:</div>';
+
+      // Title field
+      html += '<div class="eh-modal-field">';
+      html += '<input type="checkbox" id="modalFieldTitle"' + (title ? ' checked' : '') + ' />';
+      html += '<div class="eh-modal-field-label">Title:</div>';
+      html += '<div class="eh-modal-field-value' + (!title ? ' is-empty' : '') + '">' + SPM.esc(title || '(empty)') + '</div>';
+      html += '</div>';
+
+      // Location field
+      html += '<div class="eh-modal-field">';
+      html += '<input type="checkbox" id="modalFieldLocation"' + (loc ? ' checked' : '') + ' />';
+      html += '<div class="eh-modal-field-label">Location:</div>';
+      html += '<div class="eh-modal-field-value' + (!loc ? ' is-empty' : '') + '">' + SPM.esc(loc || '(empty)') + '</div>';
+      html += '</div>';
+
+      // Description field
+      html += '<div class="eh-modal-field">';
+      html += '<input type="checkbox" id="modalFieldDescription"' + (desc ? ' checked' : '') + ' />';
+      html += '<div class="eh-modal-field-label">Description:</div>';
+      html += '<div class="eh-modal-field-value' + (!desc ? ' is-empty' : '') + '">' + SPM.esc(desc || '(empty)') + '</div>';
+      html += '</div>';
+
+      // Note about date/time
+      html += '<div class="eh-modal-note">Date/time will NOT be changed.</div>';
+
+      // Action buttons
+      html += '<div class="eh-modal-actions">';
+      html += '<button class="eh-modal-btn-cancel" onclick="closeModal()">Cancel</button>';
+      html += '<button class="eh-modal-btn-confirm" onclick="doBatchLink()">Link &amp; Update</button>';
+      html += '</div>';
+
+      document.getElementById('modalContent').innerHTML = html;
+      document.getElementById('modalOverlay').classList.add('active');
+    }
+
+    /**
+     * Closes the field preview modal. Returns to linking mode with
+     * checkbox selections preserved.
+     */
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.remove('active');
     }
 
 
@@ -1252,7 +1671,9 @@
 
       // Exit linking mode on refresh
       linkingApaEventId = null;
+      linkingApaEvent = null;
       linkingApaTitle = '';
+      checkedCalIds = {};
       document.getElementById('linkBanner').classList.remove('active');
 
       SPM.callServer('getSyncStatus')
@@ -1282,16 +1703,26 @@
     // ======================================================================
 
     /**
-     * Creates a new Google Calendar event from an unlinked APA event.
+     * Creates new Google Calendar event(s) from an unlinked APA event.
+     * Multi-day events create one calendar event per day server-side.
      *
      * @param {string} apaEventId - the APA event ID to create from
+     * @param {number} dayCount - number of days the event spans
      */
-    function doCreate(apaEventId) {
-      document.getElementById('statusText').textContent = 'Creating calendar event...';
+    function doCreate(apaEventId, dayCount) {
+      var statusMsg = dayCount > 1
+        ? 'Creating ' + dayCount + ' calendar events...'
+        : 'Creating calendar event...';
+      document.getElementById('statusText').textContent = statusMsg;
+
       SPM.callServer('createCalendarEvent', { apaEventId: apaEventId })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
-          showToast('Event created');
+          var created = data.created || 1;
+          var toastMsg = created > 1
+            ? 'Created ' + created + ' calendar events'
+            : 'Event created';
+          showToast(toastMsg);
           loadSyncStatus();
         })
         .catch(function(err) {
@@ -1300,28 +1731,53 @@
     }
 
     /**
-     * Links an APA event to an existing Google Calendar event.
-     * Called when user clicks a calendar card in linking mode.
+     * Batch-links multiple calendar events to one APA event, with
+     * optional field updates. Called from the field preview modal.
      *
-     * @param {string} apaEventId - the APA event ID
-     * @param {string} calEventId - the Google Calendar event ID
+     * Reads checkbox states from the modal to determine which fields
+     * (title, location, description) to copy from APA to calendar.
      */
-    function doLink(apaEventId, calEventId) {
+    function doBatchLink() {
+      if (!linkingApaEventId || !linkingApaEvent) return;
+
+      var calendarEventIds = Object.keys(checkedCalIds);
+      if (calendarEventIds.length === 0) return;
+
+      // Read field checkboxes from modal
+      var fieldsToUpdate = {
+        title: !!document.getElementById('modalFieldTitle').checked,
+        location: !!document.getElementById('modalFieldLocation').checked,
+        description: !!document.getElementById('modalFieldDescription').checked
+      };
+
+      var apaEventId = linkingApaEventId;
+
+      // Close modal and exit linking mode
+      closeModal();
       exitLinkingMode();
-      document.getElementById('statusText').textContent = 'Linking events...';
-      SPM.callServer('linkEvents', { apaEventId: apaEventId, calendarEventId: calEventId })
+
+      document.getElementById('statusText').textContent = 'Linking ' + calendarEventIds.length + ' event' + (calendarEventIds.length > 1 ? 's' : '') + '...';
+
+      SPM.callServer('batchLinkEvents', {
+        apaEventId: apaEventId,
+        calendarEventIds: calendarEventIds,
+        fieldsToUpdate: fieldsToUpdate
+      })
         .then(function(data) {
           if (data.error) { showError(data.error); return; }
-          showToast('Events linked');
+          var msg = calendarEventIds.length > 1
+            ? calendarEventIds.length + ' events linked'
+            : 'Event linked';
+          showToast(msg);
           loadSyncStatus();
         })
         .catch(function(err) {
-          showError('Link failed: ' + err.message);
+          showError('Batch link failed: ' + err.message);
         });
     }
 
     /**
-     * Updates a linked Google Calendar event with current APA data.
+     * Updates a single linked Google Calendar event with current APA data.
      *
      * @param {string} calendarEventId - the calendar event ID to update
      * @param {string} apaEventId - the APA event ID with fresh data
@@ -1340,7 +1796,58 @@
     }
 
     /**
-     * Removes the link between an APA event and its Google Calendar event.
+     * Updates ALL calendar events linked to a given APA event.
+     * Iterates through the linked group and calls updateCalendarEvent
+     * for each one sequentially.
+     *
+     * @param {string} apaEventId - the APA event ID whose links to update
+     */
+    function doUpdateAll(apaEventId) {
+      // Find the group
+      var group = null;
+      for (var i = 0; i < linkedGroups.length; i++) {
+        if (linkedGroups[i].apaEvent.apaEventId === apaEventId) {
+          group = linkedGroups[i];
+          break;
+        }
+      }
+      if (!group) return;
+
+      var calEvents = group.calEvents;
+      document.getElementById('statusText').textContent = 'Updating ' + calEvents.length + ' calendar events...';
+
+      // Chain update calls sequentially
+      var chain = Promise.resolve();
+      var errors = [];
+      for (var c = 0; c < calEvents.length; c++) {
+        (function(calId) {
+          chain = chain.then(function() {
+            return SPM.callServer('updateCalendarEvent', {
+              calendarEventId: calId,
+              apaEventId: apaEventId
+            }).then(function(data) {
+              if (data.error) errors.push(data.error);
+            });
+          });
+        })(calEvents[c].calendarEventId);
+      }
+
+      chain
+        .then(function() {
+          if (errors.length > 0) {
+            showError('Some updates failed: ' + errors.join('; '));
+          } else {
+            showToast(calEvents.length + ' events updated');
+          }
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Update all failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Removes the link between an APA event and a single Google Calendar event.
      * Does NOT delete the calendar event — just removes the association.
      *
      * @param {string} calendarEventId - the calendar event ID to unlink
@@ -1355,6 +1862,56 @@
         })
         .catch(function(err) {
           showError('Unlink failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Unlinks ALL calendar events linked to a given APA event.
+     * Iterates through the linked group and calls unlinkEvent
+     * for each one sequentially.
+     *
+     * @param {string} apaEventId - the APA event ID whose links to remove
+     */
+    function doUnlinkAll(apaEventId) {
+      // Find the group
+      var group = null;
+      for (var i = 0; i < linkedGroups.length; i++) {
+        if (linkedGroups[i].apaEvent.apaEventId === apaEventId) {
+          group = linkedGroups[i];
+          break;
+        }
+      }
+      if (!group) return;
+
+      var calEvents = group.calEvents;
+      document.getElementById('statusText').textContent = 'Unlinking ' + calEvents.length + ' events...';
+
+      // Chain unlink calls sequentially
+      var chain = Promise.resolve();
+      var errors = [];
+      for (var c = 0; c < calEvents.length; c++) {
+        (function(calId) {
+          chain = chain.then(function() {
+            return SPM.callServer('unlinkEvent', {
+              calendarEventId: calId
+            }).then(function(data) {
+              if (data.error) errors.push(data.error);
+            });
+          });
+        })(calEvents[c].calendarEventId);
+      }
+
+      chain
+        .then(function() {
+          if (errors.length > 0) {
+            showError('Some unlinks failed: ' + errors.join('; '));
+          } else {
+            showToast(calEvents.length + ' events unlinked');
+          }
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Unlink all failed: ' + err.message);
         });
     }
 
@@ -1436,10 +1993,26 @@
         exitLinkingMode();
       });
 
-      // -- Escape key exits linking mode --
+      // -- Wire up "Link Selected" button --
+      document.getElementById('linkSelectedBtn').addEventListener('click', function() {
+        showFieldPreviewModal();
+      });
+
+      // -- Escape key: exits linking mode or closes modal --
       document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape' && linkingApaEventId) {
-          exitLinkingMode();
+        if (e.key === 'Escape') {
+          if (document.getElementById('modalOverlay').classList.contains('active')) {
+            closeModal();
+          } else if (linkingApaEventId) {
+            exitLinkingMode();
+          }
+        }
+      });
+
+      // -- Click outside modal closes it --
+      document.getElementById('modalOverlay').addEventListener('click', function(e) {
+        if (e.target === this) {
+          closeModal();
         }
       });
 
