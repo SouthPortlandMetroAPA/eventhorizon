@@ -940,6 +940,7 @@
             <input type="text" id="filterCal" placeholder="Filter calendar events...">
             <div class="eh-col-toggles">
               <button class="eh-toggle-btn active" id="toggleHideLinkedCal">Show All</button>
+              <button class="eh-toggle-btn active" id="toggleHideIgnoredCal">Hide Ignored</button>
             </div>
           </div>
           <div class="eh-col-body" id="listCal">
@@ -1058,11 +1059,13 @@
 
     /** Set of ignored APA event IDs. Loaded from getIgnoredEvents on init. */
     var ignoredApaIds = new Set();
+    var ignoredCalIds = new Set();
 
     /** Filter toggle states (ephemeral, reset on page refresh) */
     var hideLinkedApa = true;
     var hideLinkedCal = true;
-    var hideIgnored = true;  // Default: hide ignored events
+    var hideIgnored = true;      // Default: hide ignored APA events
+    var hideIgnoredCal = true;   // Default: hide ignored calendar events
 
 
     // ======================================================================
@@ -1573,11 +1576,16 @@
         var isLinked = !!linkedCalIds[evt.calendarEventId];
         var isChecked = !!checkedCalIds[evt.calendarEventId];
 
+        var isIgnoredCal = ignoredCalIds.has(evt.calendarEventId);
+
         // Hide Linked toggle: skip linked cards when active
         if (hideLinkedCal && isLinked) continue;
+        // Hide Ignored toggle: skip ignored unlinked calendar cards
+        if (hideIgnoredCal && isIgnoredCal && !isLinked) continue;
 
         var cardClass = 'eh-event-card';
         if (isLinked) cardClass += ' is-linked';
+        if (isIgnoredCal && !isLinked) cardClass += ' is-ignored';
         if (isChecked) cardClass += ' is-check-selected';
 
         // In linking mode, unlinked cards are clickable to toggle checkbox
@@ -1599,6 +1607,10 @@
         if (isLinked) {
           html += '<span class="linked-badge">\u2713 Linked</span>';
         }
+        // Ignored badge (calendar)
+        if (isIgnoredCal && !isLinked) {
+          html += '<span class="ignored-badge">IGNORED</span>';
+        }
 
         // Title
         html += '<div class="eh-event-card-title">' + SPM.esc(evt.title || 'Untitled') + '</div>';
@@ -1615,6 +1627,15 @@
           html += '<div>' + SPM.esc(evt.location) + '</div>';
         }
         html += '</div>'; // end meta
+
+        // Ignore/Unignore button for non-linked, non-linking-mode cards
+        if (!isLinked && !inLinkingMode) {
+          if (isIgnoredCal) {
+            html += '<button class="eh-btn-ignore" onclick="event.stopPropagation(); doUnignoreCal(\'' + SPM.esc(evt.calendarEventId) + '\')">Unignore</button>';
+          } else {
+            html += '<button class="eh-btn-ignore" onclick="event.stopPropagation(); doIgnoreCal(\'' + SPM.esc(evt.calendarEventId) + '\')">Ignore</button>';
+          }
+        }
 
         // Close checkbox wrapper if in linking mode
         if (inLinkingMode && !isLinked) {
@@ -1899,6 +1920,43 @@
         .catch(function(err) {
           console.warn('Failed to load ignored events:', err.message);
         });
+    }
+
+
+    /**
+     * Fetches ignored calendar event IDs from the API.
+     * Called once on page load (parallel with getSyncStatus).
+     */
+    function loadIgnoredCalEvents() {
+      SPM.callServer('getIgnoredCalEvents')
+        .then(function(data) {
+          if (data.error) return;
+          ignoredCalIds = new Set(data.ignoredCalIds || []);
+          if (syncItems.length > 0) renderAll();
+        })
+        .catch(function() {});
+    }
+
+    function doIgnoreCal(calendarEventId) {
+      SPM.callServer('ignoreCalEvent', { calendarEventId: calendarEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          ignoredCalIds = new Set(data.ignoredCalIds || []);
+          showToast('Calendar event ignored');
+          renderAll();
+        })
+        .catch(function(err) { showError('Ignore failed: ' + err.message); });
+    }
+
+    function doUnignoreCal(calendarEventId) {
+      SPM.callServer('unignoreCalEvent', { calendarEventId: calendarEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          ignoredCalIds = new Set(data.ignoredCalIds || []);
+          showToast('Calendar event unignored');
+          renderAll();
+        })
+        .catch(function(err) { showError('Unignore failed: ' + err.message); });
     }
 
 
@@ -2487,9 +2545,18 @@
         }
       });
 
-      // -- Initial load: sync status + ignored list in parallel --
+      // -- Hide Ignored toggle — Calendar column --
+      document.getElementById('toggleHideIgnoredCal').addEventListener('click', function() {
+        hideIgnoredCal = !hideIgnoredCal;
+        this.classList.toggle('active', hideIgnoredCal);
+        this.textContent = hideIgnoredCal ? 'Hide Ignored' : 'Show Ignored';
+        renderCalColumn(document.getElementById('filterCal').value);
+      });
+
+      // -- Initial load: sync status + ignored lists in parallel --
       loadSyncStatus();
       loadIgnoredEvents();
+      loadIgnoredCalEvents();
     });
   </script>
 
