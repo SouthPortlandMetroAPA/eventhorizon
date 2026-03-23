@@ -907,7 +907,7 @@
           <div class="eh-col-filter">
             <input type="text" id="filterApa" placeholder="Filter APA events...">
             <div class="eh-col-toggles">
-              <button class="eh-toggle-btn" id="toggleHideLinkedApa">Hide Linked</button>
+              <button class="eh-toggle-btn active" id="toggleHideLinkedApa">Show All</button>
               <button class="eh-toggle-btn active" id="toggleHideIgnored">Hide Ignored</button>
             </div>
           </div>
@@ -939,7 +939,7 @@
           <div class="eh-col-filter">
             <input type="text" id="filterCal" placeholder="Filter calendar events...">
             <div class="eh-col-toggles">
-              <button class="eh-toggle-btn" id="toggleHideLinkedCal">Hide Linked</button>
+              <button class="eh-toggle-btn active" id="toggleHideLinkedCal">Show All</button>
             </div>
           </div>
           <div class="eh-col-body" id="listCal">
@@ -1060,8 +1060,8 @@
     var ignoredApaIds = new Set();
 
     /** Filter toggle states (ephemeral, reset on page refresh) */
-    var hideLinkedApa = false;
-    var hideLinkedCal = false;
+    var hideLinkedApa = true;
+    var hideLinkedCal = true;
     var hideIgnored = true;  // Default: hide ignored events
 
 
