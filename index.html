@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+  ============================================================================
+  EventHorizon - index.html (Standalone / GitHub Pages)
+  ============================================================================
+
+  PURPOSE:
+    Admin dashboard for EventHorizon calendar sync. Displays a comparison
+    of APA events (from poolplayers.com API) and Google Calendar events,
+    allowing the admin to link, create, update, or unlink events.
+
+  AUTHENTICATION:
+    Admin token is read from the URL query parameter: ?admin=<token>
+    If missing or empty, the page shows a lock icon error and blocks all UI.
+    The token is passed to every API call via SPM.callServer (auto-injected
+    by spm-core.js from SPM_CONFIG.adminToken).
+
+  ARCHITECTURE:
+    Standalone build — NO dependency on Google Apps Script runtime.
+    Uses shared spm-core.js for fetch() POST to Cloudflare Worker
+    (eventhorizon.spmapa.workers.dev) which proxies to the GAS doPost
+    endpoint. JSON request/response with Content-Type: text/plain
+    (GAS redirect quirk).
+
+  API ROUTES (via SPM.callServer):
+    getSyncStatus   — returns { ok, items[] } with sync comparison data
+    createEvent     — creates a Google Calendar event from an APA event
+    linkEvent       — links an APA event to an existing calendar event
+    updateEvent     — updates a linked calendar event with APA data
+    unlinkEvent     — removes the link between APA and calendar events
+
+  ITEM SHAPE (from getSyncStatus):
+    Each item in the items[] array has:
+      status:       'linked' | 'unlinked' | 'calendar_only' | 'needs_update'
+      apaEvent:     { id, title, date, startTime, endTime, location } | null
+      calEvent:     { id, title, date, startTime, endTime, location } | null
+      suggestedMatch: { id, title } | null  (fuzzy match for unlinked items)
+
+  RESPONSIVE:
+    Standalone approach (NOT GAS iframe):
+    - 16px base font, CSS @media queries, no zoom hacks
+    - Uses shared spm-base.css for card, button, modal, header classes
+    - App-specific CSS inline for badges, sync card layout, actions
+
+  BRANDING:
+    Same APA visual identity as all family apps:
+    - --spm-primary: #ea002a (red), --spm-accent: #0031a1 (blue)
+    - Header gradient, 22px radius cards, gradient buttons
+    - system-ui font stack
+
+  ============================================================================
+  -->
+  <title>EventHorizon — South Portland Metro APA</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://southportlandmetroapa.github.io/shared/spm-base.css">
+  <style>
+    /* ==================================================================
+       App-Specific CSS — EventHorizon
+       ==================================================================
+       Extends spm-base.css. Uses shared classes for card, button, modal,
+       header, page container. Only sync-specific layout and badge colors
+       are defined here.
+       ================================================================== */
+
+    /* -- Auth error page ------------------------------------------------ */
+    .auth-error {
+      text-align: center;
+      padding: 48px 24px;
+    }
+    .auth-error-icon {
+      font-size: 3rem;
+      margin-bottom: 16px;
+    }
+    .auth-error-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+    .auth-error-msg {
+      font-size: 0.9375rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    /* -- Header extras -------------------------------------------------- */
+    .spm-header .header-tag {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 2px 12px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    /* -- Toolbar -------------------------------------------------------- */
+    .eh-toolbar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .eh-toolbar-btn {
+      flex: 1;
+      padding: 10px 0;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--card);
+      color: var(--text);
+      font-size: 0.875rem;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s;
+      min-height: 44px;
+    }
+    .eh-toolbar-btn:hover {
+      background: var(--bg);
+    }
+
+    /* -- Error banner --------------------------------------------------- */
+    .eh-error-banner {
+      background: #fef2f2;
+      border: 1px solid var(--spm-primary);
+      border-radius: 12px;
+      padding: 12px 16px;
+      margin-bottom: 12px;
+      color: #991b1b;
+      font-size: 0.875rem;
+      font-weight: 600;
+      display: none;
+    }
+
+    /* -- Status text ---------------------------------------------------- */
+    .eh-status {
+      text-align: center;
+      font-size: 0.875rem;
+      color: var(--muted);
+      margin-bottom: 12px;
+      min-height: 1.3em;
+    }
+
+    /* -- Status badges -------------------------------------------------- */
+    .badge-linked {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .badge-unlinked {
+      background: #fef9c3;
+      color: #854d0e;
+    }
+    .badge-calendar-only {
+      background: #f3f4f6;
+      color: #4b5563;
+    }
+    .badge-needs-update {
+      background: #ffedd5;
+      color: #9a3412;
+    }
+
+    /* -- Sync card layout ----------------------------------------------- */
+    .sync-card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .sync-card-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* Side-by-side event comparison for linked/needs-update items */
+    .sync-comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 599px) {
+      .sync-comparison {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .sync-side {
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+    }
+    .sync-side-label {
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .sync-field {
+      margin-bottom: 4px;
+      font-size: 0.875rem;
+      line-height: 1.4;
+    }
+    .sync-field-label {
+      font-weight: 700;
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .sync-field-value {
+      font-weight: 500;
+    }
+    /* Highlight differences in needs-update cards */
+    .sync-field-diff {
+      color: #9a3412;
+      background: #ffedd5;
+      padding: 0 4px;
+      border-radius: 4px;
+    }
+
+    /* -- Single event detail (unlinked / calendar-only) ------------------ */
+    .sync-detail {
+      padding: 12px;
+      border-radius: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+    }
+
+    /* -- Suggested match ------------------------------------------------ */
+    .sync-suggestion {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      font-size: 0.8125rem;
+      flex-wrap: wrap;
+    }
+    .sync-suggestion-label {
+      color: #1e40af;
+      font-weight: 600;
+    }
+    .sync-suggestion-btn {
+      padding: 4px 12px;
+      border: 1px solid #3b82f6;
+      border-radius: 999px;
+      background: #fff;
+      color: #1d4ed8;
+      font-size: 0.75rem;
+      font-weight: 700;
+      cursor: pointer;
+      min-height: 32px;
+      transition: background 0.15s;
+    }
+    .sync-suggestion-btn:hover {
+      background: #eff6ff;
+    }
+
+    /* -- Action button row ---------------------------------------------- */
+    .sync-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .sync-actions .spm-btn {
+      font-size: 0.8125rem;
+      padding: 8px 16px;
+      min-height: 40px;
+    }
+
+    /* -- Toast ---------------------------------------------------------- */
+    .eh-toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #166534;
+      color: #fff;
+      padding: 12px 24px;
+      border-radius: 999px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+      z-index: 10000;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+    .eh-toast.show {
+      opacity: 1;
+    }
+
+    /* -- Modal picker list ---------------------------------------------- */
+    .picker-search {
+      width: 100%;
+      padding: 10px 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 0.9375rem;
+      font-family: inherit;
+      margin-bottom: 12px;
+      min-height: 44px;
+    }
+    .picker-search:focus {
+      outline: 2px solid var(--spm-accent);
+      outline-offset: -2px;
+    }
+    .picker-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      text-align: left;
+      max-height: 50svh;
+      overflow-y: auto;
+    }
+    .picker-item {
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      min-height: 48px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .picker-item:hover {
+      background: #eff6ff;
+      border-color: #3b82f6;
+    }
+    .picker-item-title {
+      font-weight: 700;
+      font-size: 0.875rem;
+    }
+    .picker-item-meta {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .picker-empty {
+      text-align: center;
+      padding: 24px;
+      color: var(--muted);
+      font-size: 0.875rem;
+    }
+
+    /* -- Loading skeleton ----------------------------------------------- */
+    .eh-skeleton {
+      background: linear-gradient(90deg, #e5e5e5 25%, #f0f0f0 50%, #e5e5e5 75%);
+      background-size: 200% 100%;
+      animation: shimmer 1.5s infinite;
+      border-radius: 12px;
+      height: 80px;
+      margin-bottom: 12px;
+    }
+    @keyframes shimmer {
+      0% { background-position: -200% 0; }
+      100% { background-position: 200% 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="spm-page">
+
+    <!-- ================================================================ -->
+    <!-- Header -->
+    <!-- ================================================================ -->
+    <div class="spm-header">
+      <h1>South Portland Metro APA</h1>
+      <div class="spm-subtitle">EventHorizon</div>
+      <div class="header-tag">Calendar Sync</div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- Auth error (shown when admin token is missing) -->
+    <!-- ================================================================ -->
+    <div id="authError" style="display: none;">
+      <div class="auth-error">
+        <div class="auth-error-icon">&#128274;</div>
+        <div class="auth-error-title">Admin Token Required</div>
+        <div class="auth-error-msg">
+          This page requires an admin token.<br>
+          Access it via: index.html?admin=&lt;token&gt;
+        </div>
+      </div>
+    </div>
+
+    <!-- ================================================================ -->
+    <!-- Main content (hidden until auth passes) -->
+    <!-- ================================================================ -->
+    <div id="mainContent" style="display: none;">
+
+      <!-- Toolbar -->
+      <div class="eh-toolbar">
+        <button class="eh-toolbar-btn" id="refreshBtn">&#8635; Refresh</button>
+      </div>
+
+      <!-- Error banner -->
+      <div class="eh-error-banner" id="errorBanner"></div>
+
+      <!-- Status text -->
+      <div class="eh-status" id="statusText">Loading...</div>
+
+      <!-- Skeleton loaders (shown during initial load) -->
+      <div id="skeletons">
+        <div class="eh-skeleton"></div>
+        <div class="eh-skeleton"></div>
+        <div class="eh-skeleton"></div>
+      </div>
+
+      <!-- Sync items list -->
+      <div id="syncList"></div>
+
+    </div>
+
+    <!-- Footer -->
+    <div class="spm-footer">South Portland Metro APA &mdash; EventHorizon</div>
+
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- Link-to picker modal -->
+  <!-- ================================================================== -->
+  <div class="spm-modal" id="pickerModal">
+    <div class="spm-modal-panel">
+      <h2 style="margin-bottom: 16px; font-size: 1.125rem;">Link to Calendar Event</h2>
+      <input type="text" class="picker-search" id="pickerSearch" placeholder="Filter events...">
+      <ul class="picker-list" id="pickerList"></ul>
+      <div style="margin-top: 16px;">
+        <button class="spm-btn spm-btn-secondary" id="pickerCancelBtn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================== -->
+  <!-- Toast -->
+  <!-- ================================================================== -->
+  <div class="eh-toast" id="toast"></div>
+
+  <!-- ================================================================== -->
+  <!-- Scripts -->
+  <!-- ================================================================== -->
+
+  <!-- SPM_CONFIG must be set BEFORE spm-core.js loads -->
+  <script>
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      var token = params.get('admin') || '';
+      window.SPM_CONFIG = {
+        apiUrl: 'https://eventhorizon.spmapa.workers.dev',
+        contentType: 'text/plain',
+        adminToken: token
+      };
+    })();
+  </script>
+  <script src="https://southportlandmetroapa.github.io/shared/spm-core.js"></script>
+
+  <script>
+    // ======================================================================
+    // EventHorizon — Admin Frontend JS
+    // ======================================================================
+    //
+    // Manages the sync view: fetches sync status from the worker, renders
+    // cards for each event comparison, handles create/link/update/unlink
+    // actions, and refreshes after each mutation.
+    //
+    // DEPENDENCIES:
+    //   - spm-core.js: SPM.esc(), SPM.callServer(), SPM.setStatus()
+    //   - spm-base.css: card, button, modal, badge, header classes
+    //
+    // DATA FLOW:
+    //   1. On load → getSyncStatus → render cards
+    //   2. User action → createEvent / linkEvent / updateEvent / unlinkEvent
+    //   3. After action → toast + full refresh (getSyncStatus again)
+    //
+    // ======================================================================
+
+
+    // -- Module state -------------------------------------------------------
+
+    /** Cached sync data from the last getSyncStatus call */
+    var syncData = null;
+
+    /** The APA event ID currently being linked (for the picker modal) */
+    var pendingLinkApaId = null;
+
+    /** All calendar-only items, cached for the picker modal */
+    var calendarOnlyItems = [];
+
+
+    // ======================================================================
+    // Date Formatting
+    // ======================================================================
+
+    /**
+     * Formats an ISO date string (YYYY-MM-DD) as "Saturday, March 28".
+     * Uses the browser's Intl.DateTimeFormat for locale-aware day/month names.
+     *
+     * @param {string} dateStr - ISO date string, e.g. "2026-03-28"
+     * @returns {string} formatted date, e.g. "Saturday, March 28"
+     */
+    function formatDate(dateStr) {
+      if (!dateStr) return '';
+      // Parse as local date (not UTC) by splitting the string.
+      // new Date('2026-03-28') parses as UTC midnight, which can shift
+      // the day in negative-offset timezones. Splitting avoids this.
+      var parts = dateStr.split('-');
+      var d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      return d.toLocaleDateString('en-US', {
+        weekday: 'long',
+        month: 'long',
+        day: 'numeric'
+      });
+    }
+
+    /**
+     * Formats a time string for display. Expects HH:MM (24h) or already
+     * formatted strings. Converts to 12-hour format with AM/PM.
+     *
+     * @param {string} timeStr - e.g. "09:00" or "17:00"
+     * @returns {string} e.g. "9:00 AM"
+     */
+    function formatTime(timeStr) {
+      if (!timeStr) return '';
+      // If already has AM/PM, return as-is
+      if (/[AaPp][Mm]/.test(timeStr)) return timeStr;
+      var parts = timeStr.split(':');
+      var h = parseInt(parts[0], 10);
+      var m = parts[1] || '00';
+      var ampm = h >= 12 ? 'PM' : 'AM';
+      if (h === 0) h = 12;
+      else if (h > 12) h -= 12;
+      return h + ':' + m + ' ' + ampm;
+    }
+
+    /**
+     * Formats a time range for display.
+     *
+     * @param {string} start - start time, e.g. "09:00"
+     * @param {string} end   - end time, e.g. "17:00"
+     * @returns {string} e.g. "9:00 AM \u2013 5:00 PM" or single time if no end
+     */
+    function formatTimeRange(start, end) {
+      var s = formatTime(start);
+      var e = formatTime(end);
+      if (s && e) return s + ' \u2013 ' + e;
+      return s || e || '';
+    }
+
+
+    // ======================================================================
+    // Rendering
+    // ======================================================================
+
+    /**
+     * Returns the CSS class and display label for a sync status.
+     *
+     * @param {string} status - 'linked', 'unlinked', 'calendar_only', 'needs_update'
+     * @returns {{ cls: string, label: string }}
+     */
+    function badgeInfo(status) {
+      switch (status) {
+        case 'linked':        return { cls: 'badge-linked',        label: 'Linked' };
+        case 'unlinked':      return { cls: 'badge-unlinked',      label: 'Unlinked' };
+        case 'calendar_only': return { cls: 'badge-calendar-only', label: 'Calendar Only' };
+        case 'needs_update':  return { cls: 'badge-needs-update',  label: 'Needs Update' };
+        default:              return { cls: 'badge-calendar-only', label: status || 'Unknown' };
+      }
+    }
+
+    /**
+     * Renders an event's fields (date, time, title, location) as HTML.
+     *
+     * @param {Object} evt - { title, date, startTime, endTime, location }
+     * @returns {string} HTML string
+     */
+    function renderEventFields(evt) {
+      if (!evt) return '<div style="color:var(--muted); font-style:italic;">No data</div>';
+      var html = '';
+      if (evt.title) {
+        html += '<div class="sync-field"><span class="sync-field-value">' + SPM.esc(evt.title) + '</span></div>';
+      }
+      if (evt.date) {
+        html += '<div class="sync-field"><span class="sync-field-label">Date </span><span class="sync-field-value">' + SPM.esc(formatDate(evt.date)) + '</span></div>';
+      }
+      var timeRange = formatTimeRange(evt.startTime, evt.endTime);
+      if (timeRange) {
+        html += '<div class="sync-field"><span class="sync-field-label">Time </span><span class="sync-field-value">' + SPM.esc(timeRange) + '</span></div>';
+      }
+      if (evt.location) {
+        html += '<div class="sync-field"><span class="sync-field-label">Location </span><span class="sync-field-value">' + SPM.esc(evt.location) + '</span></div>';
+      }
+      return html;
+    }
+
+    /**
+     * Renders the full sync list from syncData.items[].
+     * Clears and repopulates the #syncList container.
+     */
+    function renderSyncList() {
+      var container = document.getElementById('syncList');
+      var skeletons = document.getElementById('skeletons');
+      skeletons.style.display = 'none';
+
+      if (!syncData || !syncData.items || syncData.items.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding:24px; color:var(--muted);">No events found.</div>';
+        SPM.setStatus('No events to display.');
+        return;
+      }
+
+      // Cache calendar-only items for the picker modal
+      calendarOnlyItems = syncData.items.filter(function(item) {
+        return item.status === 'calendar_only';
+      });
+
+      // Sort: needs_update first, then unlinked, then linked, then calendar_only
+      var order = { needs_update: 0, unlinked: 1, linked: 2, calendar_only: 3 };
+      var sorted = syncData.items.slice().sort(function(a, b) {
+        var oa = order[a.status] !== undefined ? order[a.status] : 9;
+        var ob = order[b.status] !== undefined ? order[b.status] : 9;
+        if (oa !== ob) return oa - ob;
+        // Secondary sort by date
+        var da = (a.apaEvent && a.apaEvent.date) || (a.calEvent && a.calEvent.date) || '';
+        var db = (b.apaEvent && b.apaEvent.date) || (b.calEvent && b.calEvent.date) || '';
+        return da.localeCompare(db);
+      });
+
+      var html = '';
+      for (var i = 0; i < sorted.length; i++) {
+        html += renderSyncCard(sorted[i]);
+      }
+      container.innerHTML = html;
+
+      // Update status count
+      var linked = syncData.items.filter(function(it) { return it.status === 'linked'; }).length;
+      var needsUpdate = syncData.items.filter(function(it) { return it.status === 'needs_update'; }).length;
+      var unlinked = syncData.items.filter(function(it) { return it.status === 'unlinked'; }).length;
+      var calOnly = calendarOnlyItems.length;
+
+      var parts = [];
+      if (needsUpdate) parts.push(needsUpdate + ' need' + (needsUpdate === 1 ? 's' : '') + ' update');
+      if (unlinked) parts.push(unlinked + ' unlinked');
+      if (linked) parts.push(linked + ' linked');
+      if (calOnly) parts.push(calOnly + ' calendar only');
+      SPM.setStatus(syncData.items.length + ' events \u2014 ' + parts.join(', '));
+    }
+
+    /**
+     * Renders a single sync item card.
+     *
+     * @param {Object} item - sync item from getSyncStatus
+     * @returns {string} HTML string for the card
+     */
+    function renderSyncCard(item) {
+      var badge = badgeInfo(item.status);
+      var html = '<div class="spm-card">';
+
+      // -- Header: badge
+      html += '<div class="sync-card-header">';
+      html += '<span class="spm-badge ' + badge.cls + '">' + SPM.esc(badge.label) + '</span>';
+      // Show primary title in header for quick scanning
+      var primaryTitle = '';
+      if (item.apaEvent) primaryTitle = item.apaEvent.title;
+      else if (item.calEvent) primaryTitle = item.calEvent.title;
+      if (primaryTitle) {
+        html += '<span style="font-weight:700; font-size:0.9375rem;">' + SPM.esc(primaryTitle) + '</span>';
+      }
+      html += '</div>';
+
+      // -- Body: depends on status
+      html += '<div class="sync-card-body">';
+
+      if (item.status === 'linked' || item.status === 'needs_update') {
+        // Side-by-side comparison
+        html += '<div class="sync-comparison">';
+        html += '<div class="sync-side"><div class="sync-side-label">APA Event</div>' + renderEventFields(item.apaEvent) + '</div>';
+        html += '<div class="sync-side"><div class="sync-side-label">Google Calendar</div>' + renderEventFields(item.calEvent) + '</div>';
+        html += '</div>';
+      } else if (item.status === 'unlinked') {
+        // Single APA event detail
+        html += '<div class="sync-detail">' + renderEventFields(item.apaEvent) + '</div>';
+        // Suggested match?
+        if (item.suggestedMatch) {
+          html += '<div class="sync-suggestion">';
+          html += '<span class="sync-suggestion-label">Suggested: ' + SPM.esc(item.suggestedMatch.title) + '</span>';
+          html += '<button class="sync-suggestion-btn" onclick="doLink(\'' + SPM.esc(item.apaEvent.id) + '\', \'' + SPM.esc(item.suggestedMatch.id) + '\')">Link?</button>';
+          html += '</div>';
+        }
+      } else if (item.status === 'calendar_only') {
+        // Single calendar event detail
+        html += '<div class="sync-detail">' + renderEventFields(item.calEvent) + '</div>';
+      }
+
+      html += '</div>'; // end sync-card-body
+
+      // -- Actions
+      html += renderActions(item);
+
+      html += '</div>'; // end spm-card
+      return html;
+    }
+
+    /**
+     * Renders the action button row for a sync item.
+     *
+     * @param {Object} item - sync item
+     * @returns {string} HTML string for the action buttons
+     */
+    function renderActions(item) {
+      var html = '<div class="sync-actions">';
+
+      if (item.status === 'unlinked' && item.apaEvent) {
+        html += '<button class="spm-btn spm-btn-primary" onclick="doCreate(\'' + SPM.esc(item.apaEvent.id) + '\')">Create New</button>';
+        html += '<button class="spm-btn spm-btn-secondary" onclick="openPicker(\'' + SPM.esc(item.apaEvent.id) + '\')">Link To\u2026</button>';
+      } else if (item.status === 'needs_update' && item.apaEvent) {
+        html += '<button class="spm-btn spm-btn-primary" onclick="doUpdate(\'' + SPM.esc(item.apaEvent.id) + '\')">Update Calendar</button>';
+        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.apaEvent.id) + '\')">Unlink</button>';
+      } else if (item.status === 'linked' && item.apaEvent) {
+        html += '<button class="spm-btn spm-btn-secondary" onclick="doUnlink(\'' + SPM.esc(item.apaEvent.id) + '\')">Unlink</button>';
+      }
+      // calendar_only: no actions
+
+      html += '</div>';
+      return html;
+    }
+
+
+    // ======================================================================
+    // Data Loading
+    // ======================================================================
+
+    /**
+     * Fetches sync status from the API and renders the view.
+     * Shows skeleton loaders during first load, status text on refresh.
+     */
+    function loadSyncStatus() {
+      clearError();
+      SPM.setStatus('Loading...');
+      document.getElementById('refreshBtn').disabled = true;
+
+      SPM.callServer('getSyncStatus')
+        .then(function(data) {
+          if (data.error) {
+            showError(data.error);
+            SPM.setStatus('Error loading data.');
+            document.getElementById('skeletons').style.display = 'none';
+            return;
+          }
+          syncData = data;
+          renderSyncList();
+        })
+        .catch(function(err) {
+          showError('Failed to load sync status: ' + err.message);
+          SPM.setStatus('Error loading data.');
+          document.getElementById('skeletons').style.display = 'none';
+        })
+        .finally(function() {
+          document.getElementById('refreshBtn').disabled = false;
+        });
+    }
+
+
+    // ======================================================================
+    // Actions
+    // ======================================================================
+
+    /**
+     * Creates a new Google Calendar event from an unlinked APA event.
+     *
+     * @param {string} apaEventId - the APA event ID to create from
+     */
+    function doCreate(apaEventId) {
+      SPM.setStatus('Creating calendar event...');
+      SPM.callServer('createEvent', { apaEventId: apaEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          showToast('Event created');
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Create failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Links an APA event to an existing Google Calendar event.
+     *
+     * @param {string} apaEventId - the APA event ID
+     * @param {string} calEventId - the Google Calendar event ID
+     */
+    function doLink(apaEventId, calEventId) {
+      closePickerModal();
+      SPM.setStatus('Linking events...');
+      SPM.callServer('linkEvent', { apaEventId: apaEventId, calEventId: calEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          showToast('Events linked');
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Link failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Updates a linked Google Calendar event with current APA data.
+     *
+     * @param {string} apaEventId - the APA event ID whose link to update
+     */
+    function doUpdate(apaEventId) {
+      SPM.setStatus('Updating calendar event...');
+      SPM.callServer('updateEvent', { apaEventId: apaEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          showToast('Event updated');
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Update failed: ' + err.message);
+        });
+    }
+
+    /**
+     * Removes the link between an APA event and its Google Calendar event.
+     * Does NOT delete the calendar event — just removes the association.
+     *
+     * @param {string} apaEventId - the APA event ID to unlink
+     */
+    function doUnlink(apaEventId) {
+      SPM.setStatus('Unlinking event...');
+      SPM.callServer('unlinkEvent', { apaEventId: apaEventId })
+        .then(function(data) {
+          if (data.error) { showError(data.error); return; }
+          showToast('Event unlinked');
+          loadSyncStatus();
+        })
+        .catch(function(err) {
+          showError('Unlink failed: ' + err.message);
+        });
+    }
+
+
+    // ======================================================================
+    // Picker Modal
+    // ======================================================================
+
+    /**
+     * Opens the "Link To..." modal, showing all calendar-only events
+     * for the user to pick from.
+     *
+     * @param {string} apaEventId - the APA event ID that will be linked
+     */
+    function openPicker(apaEventId) {
+      pendingLinkApaId = apaEventId;
+      var searchInput = document.getElementById('pickerSearch');
+      searchInput.value = '';
+      renderPickerList('');
+      document.getElementById('pickerModal').classList.add('active');
+      searchInput.focus();
+    }
+
+    /**
+     * Closes the picker modal and clears pending state.
+     */
+    function closePickerModal() {
+      document.getElementById('pickerModal').classList.remove('active');
+      pendingLinkApaId = null;
+    }
+
+    /**
+     * Renders the filtered list of calendar-only events in the picker modal.
+     *
+     * @param {string} filter - search string to filter by (case-insensitive)
+     */
+    function renderPickerList(filter) {
+      var list = document.getElementById('pickerList');
+      var lower = (filter || '').toLowerCase();
+
+      var filtered = calendarOnlyItems.filter(function(item) {
+        if (!lower) return true;
+        var evt = item.calEvent || {};
+        var haystack = ((evt.title || '') + ' ' + (evt.date || '') + ' ' + (evt.location || '')).toLowerCase();
+        return haystack.indexOf(lower) !== -1;
+      });
+
+      if (filtered.length === 0) {
+        list.innerHTML = '<li class="picker-empty">No matching calendar events.</li>';
+        return;
+      }
+
+      var html = '';
+      for (var i = 0; i < filtered.length; i++) {
+        var evt = filtered[i].calEvent;
+        if (!evt) continue;
+        var calId = SPM.esc(evt.id);
+        html += '<li class="picker-item" onclick="doLink(\'' + SPM.esc(pendingLinkApaId) + '\', \'' + calId + '\')">';
+        html += '<span class="picker-item-title">' + SPM.esc(evt.title || 'Untitled') + '</span>';
+        var meta = [];
+        if (evt.date) meta.push(formatDate(evt.date));
+        if (evt.location) meta.push(evt.location);
+        if (meta.length) {
+          html += '<span class="picker-item-meta">' + SPM.esc(meta.join(' \u2022 ')) + '</span>';
+        }
+        html += '</li>';
+      }
+      list.innerHTML = html;
+    }
+
+
+    // ======================================================================
+    // Toast & Error
+    // ======================================================================
+
+    /**
+     * Shows a brief success toast at the bottom of the screen.
+     * Auto-hides after 2 seconds.
+     *
+     * @param {string} msg - message to display
+     */
+    function showToast(msg) {
+      var el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      setTimeout(function() {
+        el.classList.remove('show');
+      }, 2000);
+    }
+
+    /**
+     * Shows a red error banner below the toolbar.
+     *
+     * @param {string} msg - error message
+     */
+    function showError(msg) {
+      var el = document.getElementById('errorBanner');
+      el.textContent = msg;
+      el.style.display = '';
+    }
+
+    /**
+     * Clears the error banner.
+     */
+    function clearError() {
+      var el = document.getElementById('errorBanner');
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+
+
+    // ======================================================================
+    // Initialization
+    // ======================================================================
+
+    document.addEventListener('DOMContentLoaded', function() {
+
+      // -- Auth gate: check for admin token --
+      var token = (window.SPM_CONFIG || {}).adminToken;
+      if (!token) {
+        document.getElementById('authError').style.display = '';
+        document.getElementById('mainContent').style.display = 'none';
+        return;
+      }
+
+      // Token present — show main content
+      document.getElementById('authError').style.display = 'none';
+      document.getElementById('mainContent').style.display = '';
+
+      // -- Wire up toolbar --
+      document.getElementById('refreshBtn').addEventListener('click', function() {
+        loadSyncStatus();
+      });
+
+      // -- Wire up picker modal --
+      document.getElementById('pickerCancelBtn').addEventListener('click', function() {
+        closePickerModal();
+      });
+
+      document.getElementById('pickerSearch').addEventListener('input', function() {
+        renderPickerList(this.value);
+      });
+
+      // Close modal on backdrop click
+      document.getElementById('pickerModal').addEventListener('click', function(e) {
+        if (e.target === this) closePickerModal();
+      });
+
+      // Close modal on Escape key
+      document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') closePickerModal();
+      });
+
+      // -- Initial load --
+      loadSyncStatus();
+    });
+  </script>
+
+</body>
+</html>
