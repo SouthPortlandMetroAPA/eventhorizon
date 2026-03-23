@@ -1461,8 +1461,8 @@
 
       // Show/hide global Update All button — only when linked events need updates
       var needsUpdateCount = 0;
-      for (var gk in linkedGroupMap) {
-        if (linkedGroupMap[gk].needsUpdate) needsUpdateCount++;
+      for (var gu = 0; gu < linkedGroups.length; gu++) {
+        if (linkedGroups[gu].needsUpdate) needsUpdateCount++;
       }
       var updateAllBtn = document.getElementById('updateAllBtn');
       updateAllBtn.style.display = needsUpdateCount > 0 ? '' : 'none';
