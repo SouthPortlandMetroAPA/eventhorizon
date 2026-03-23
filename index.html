@@ -2314,7 +2314,8 @@
         })
         .finally(function() {
           document.getElementById('scanChangesBtn').disabled = false;
-          updateStatusText();
+          // Refresh all columns with fresh data from both API and calendar
+          loadSyncStatus();
         });
     }
 
